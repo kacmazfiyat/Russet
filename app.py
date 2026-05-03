@@ -5,26 +5,32 @@ from database import init_db, get_all_marketplaces, save_marketplace, delete_mar
 from excel_reader import process_excel
 from profit_calculator import calculate_results
 
+# Sayfa Ayarları
 st.set_page_config(page_title="Pro Yönetim", layout="wide", page_icon="💎")
+
+# Veritabanını Başlat
 init_db()
 
-# Yardımcı Fonksiyon: Ürün Silme
-def delete_product(barcode):
+# --- YARDIMCI FONKSİYONLAR ---
+def delete_product_from_db(barcode):
     conn = sqlite3.connect('pazaryeri.db')
     cursor = conn.cursor()
     cursor.execute("DELETE FROM products WHERE barkod = ?", (barcode,))
     conn.commit()
     conn.close()
 
+# --- SIDEBAR NAVİGASYON ---
 with st.sidebar:
     st.title("💎 Pro Yönetim")
     menu = st.radio("Menü Seçiniz:", ["📊 Analiz", "⚙️ Pazaryeri Ayarları", "📂 Veri Yükleme"])
 
-# --- 1. ANALİZ SEKİMESİ --- (Aynı mantıkla devam eder)
+# --- 1. ANALİZ / DASHBOARD SEKİMESİ ---
 if menu == "📊 Analiz":
     st.header("📊 Genel Kar-Zarar Analizi")
+    
     mps = get_all_marketplaces()
     
+    # Ürünleri Veritabanından Çek (Tüm Hafıza)
     conn = sqlite3.connect('pazaryeri.db')
     try:
         products_df = pd.read_sql_query("SELECT * FROM products", conn)
@@ -33,98 +39,167 @@ if menu == "📊 Analiz":
     conn.close()
 
     if mps.empty:
-        st.warning("⚠️ Önce Pazaryeri Ayarları yapın.")
+        st.warning("⚠️ Lütfen önce 'Pazaryeri Ayarları' menüsünden bir pazaryeri tanımlayın.")
     else:
+        # Üst Seçim Paneli
         col_setup1, col_setup2 = st.columns(2)
+        
         with col_setup1:
             if not products_df.empty:
                 product_list = products_df.apply(lambda x: f"{x['barkod']} | {x['urun_adi']}", axis=1).tolist()
-                selected_prod = st.selectbox("🔍 Ürün Ara (Hafızadan):", ["Manuel Giriş"] + product_list)
+                selected_prod = st.selectbox("🔍 Ürün Ara (Yüklü Ürünler):", ["Manuel Giriş"] + product_list)
                 
                 if selected_prod != "Manuel Giriş":
                     barcode = selected_prod.split(" | ")[0]
                     target_row = products_df[products_df['barkod'] == barcode].iloc[0]
                     initial_maliyet = float(target_row['maliyet'])
-                else: initial_maliyet = 100.0
+                else:
+                    initial_maliyet = 100.0
             else:
-                st.info("ℹ️ Hafıza boş.")
+                st.info("ℹ️ Ürün hafızası boş. Veri Yükleme sekmesinden Excel ekleyebilirsiniz.")
                 initial_maliyet = 100.0
         
         with col_setup2:
-            selected_name = st.selectbox("Pazaryeri:", mps['name'].unique())
+            selected_name = st.selectbox("Satış Yapılacak Pazaryeri:", mps['name'].unique())
             mp_data = mps[mps['name'] == selected_name].iloc[0].to_dict()
 
         st.divider()
-        col_inputs, col_metrics = st.columns([1, 2])
-        with col_inputs:
-            maliyet = st.number_input("Maliyet (TL):", min_value=0.0, value=initial_maliyet)
-            target_margin = st.number_input("🎯 Hedef Kar (%)", value=20.0)
-            
-            # Ters Hesaplama
-            kom, stp, kdv = mp_data['komisyon']/100, mp_data['stopaj']/100, mp_data['kdv']/100
-            sabit = mp_data['kargo'] + mp_data['hizmet'] + mp_data['ekstra'] + mp_data['kupon']
-            kdv_e = (kdv / (1 + kdv)) if mp_data['kdv_dahil'] == 1 else 0
-            payda = 1 - (kom + stp + (target_margin/100) + kdv_e)
-            
-            satis_fiyati_onerisi = (maliyet + sabit) / payda if payda > 0 else 0
-            st.success(f"💡 Öneri: **{round(satis_fiyati_onerisi, 2)} TL**")
-            satis_fiyati = st.number_input("Satış Fiyatı (TL):", value=round(satis_fiyati_onerisi, 2))
 
+        # Fiyat Girişleri ve Ters Hesaplama
+        col_inputs, col_metrics = st.columns([1, 2])
+        
+        with col_inputs:
+            st.subheader("💰 Fiyatlandırma")
+            maliyet = st.number_input("Ürün Alış Maliyeti (TL):", min_value=0.0, value=initial_maliyet)
+            
+            st.write("---")
+            target_margin = st.number_input("🎯 Hedef Kar Marjı (%)", value=20.0)
+            
+            # Ters Hesaplama Matematiği
+            kom = mp_data.get('komisyon', 0) / 100
+            stp = mp_data.get('stopaj', 0) / 100
+            kdv = mp_data.get('kdv', 20) / 100
+            hedef = target_margin / 100
+            sabit = (mp_data.get('kargo', 0) + mp_data.get('hizmet', 0) + 
+                     mp_data.get('ekstra', 0) + mp_data.get('kupon', 0))
+            
+            kdv_e = (kdv / (1 + kdv)) if mp_data.get('kdv_dahil') == 1 else 0
+            payda = 1 - (kom + stp + hedef + kdv_e)
+            
+            if payda <= 0:
+                st.error("⚠️ Bu gider oranlarıyla bu kar hedefine ulaşılamaz!")
+                satis_fiyati_onerisi = 0.0
+            else:
+                satis_fiyati_onerisi = (maliyet + sabit) / payda
+            
+            st.success(f"💡 Önerilen Satış Fiyatı: **{round(satis_fiyati_onerisi, 2)} TL**")
+            satis_fiyati = st.number_input("Planlanan Satış Fiyatı (TL):", min_value=0.0, value=round(satis_fiyati_onerisi, 2))
+            st.write("---")
+
+        # Kar Hesapla
         res = calculate_results(satis_fiyati, maliyet, mp_data)
+
         with col_metrics:
+            st.subheader("📈 Karlılık Sonucu")
             m1, m2, m3 = st.columns(3)
-            m1.metric("Net Kar", f"{res['net_kar']} TL", f"%{res['kar_marji']}")
-            m2.metric("Gider", f"{res['toplam_gider']} TL")
+            status_color = "normal" if res['net_kar'] >= 0 else "inverse"
+            m1.metric("Net Kar", f"{res['net_kar']} TL", delta=f"%{res['kar_marji']}", delta_color=status_color)
+            m2.metric("Toplam Gider", f"{res['toplam_gider']} TL")
             m3.metric("Tahsilat", f"{res['tahsilat']} TL")
 
-# --- 2. PAZARYERI AYARLARI (Kısa geçildi) ---
+            with st.expander("🔍 Gider Kalemlerini Gör"):
+                st.table(pd.DataFrame({
+                    "Kalem": ["Komisyon", "Kargo", "KDV", "Kupon", "Stopaj", "Ekstra"],
+                    "Tutar": [f"{res['komisyon_tutari']} TL", f"{mp_data['kargo']} TL", f"{res['kdv_tutari']} TL", 
+                              f"{mp_data['kupon']} TL", f"{mp_data['stopaj']} TL", f"{mp_data['hizmet'] + mp_data['ekstra']} TL"]
+                }))
+
+# --- 2. PAZARYERİ AYARLARI SEKİMESİ ---
 elif menu == "⚙️ Pazaryeri Ayarları":
-    st.header("⚙️ Pazaryeri Ayarları")
-    # (Önceki kodun aynısı burada kalacak)
+    st.header("⚙️ Pazaryeri Yapılandırması")
+    
+    with st.expander("➕ Yeni Pazaryeri Tanımla"):
+        with st.form("mp_form"):
+            name = st.text_input("Pazaryeri İsmi (Örn: TRENDYOL)")
+            kdv_dahil_mi = st.toggle("KDV Satış Fiyatına Dahil mi?", value=True)
+            
+            c1, c2, c3 = st.columns(3)
+            komisyon = c1.number_input("Komisyon (%)", value=20.0)
+            kargo = c2.number_input("Kargo (TL)", value=80.0)
+            kupon = c3.number_input("Kupon/İndirim (TL)", value=0.0)
+            
+            c4, c5, c6 = st.columns(3)
+            kdv_orani = c4.number_input("KDV (%)", value=20.0)
+            stopaj = c5.number_input("Stopaj (%)", value=0.0)
+            hizmet = c6.number_input("Hizmet (TL)", value=0.0)
+            
+            ekstra = st.number_input("Ekstra Gider (TL)", value=0.0)
+            
+            if st.form_submit_button("Sisteme Kaydet"):
+                save_marketplace({
+                    "name": name.upper(), "komisyon": komisyon, "kargo": kargo,
+                    "kupon": kupon, "stopaj": stopaj, "kdv": kdv_orani,
+                    "hizmet": hizmet, "ekstra": ekstra, "varsayilan": 0,
+                    "kdv_dahil": 1 if kdv_dahil_mi else 0
+                })
+                st.success("Pazaryeri kaydedildi!")
+                st.rerun()
+
+    st.divider()
+    st.subheader("📋 Kayıtlı Pazaryerleri")
+    mps_list = get_all_marketplaces()
+    
+    if not mps_list.empty:
+        st.dataframe(mps_list, use_container_width=True)
+        col_del_mp, _ = st.columns([2, 2])
+        with col_del_mp:
+            mp_to_del = st.selectbox("Silinecek Pazaryerini Seçin:", mps_list['name'].unique())
+            if st.button("Seçili Pazaryerini Sil", type="primary"):
+                mp_id = mps_list[mps_list['name'] == mp_to_del]['id'].values[0]
+                delete_marketplace(int(mp_id))
+                st.rerun()
 
 # --- 3. VERİ YÜKLEME VE HAFIZA YÖNETİMİ ---
 elif menu == "📂 Veri Yükleme":
-    st.header("📂 Veri Yükleme ve Hafıza Yönetimi")
-    
-    tab1, tab2 = st.tabs(["📤 Yeni Dosya Ekle", "🗑️ Hafızayı Yönet (Sil)"])
+    st.header("📂 Veri Yönetimi")
+    tab1, tab2 = st.tabs(["📤 Excel'den Ürün Ekle", "🗑️ Hafızadaki Ürünleri Sil"])
     
     with tab1:
-        uploaded_file = st.file_uploader("Excel Yükle (Üst üste eklenir)", type="xlsx")
+        st.info("Yeni yüklenen ürünler mevcut listeye eklenir.")
+        uploaded_file = st.file_uploader("Dosya Seçin", type="xlsx")
         if uploaded_file:
             df_excel = process_excel(uploaded_file)
             if not df_excel.empty:
-                st.success(f"Hafızaya eklendi! Toplam {len(df_excel)} ürün.")
+                st.success(f"Başarılı! Hafızaya {len(df_excel)} ürün eklendi.")
                 st.rerun()
 
     with tab2:
         conn = sqlite3.connect('pazaryeri.db')
-        current_products = pd.read_sql_query("SELECT * FROM products", conn)
+        all_products = pd.read_sql_query("SELECT * FROM products", conn)
         conn.close()
         
-        if not current_products.empty:
-            st.write(f"Hafızada toplam **{len(current_products)}** ürün var.")
+        if not all_products.empty:
+            st.write(f"Sistemde kayıtlı **{len(all_products)}** ürün var.")
             
-            # Silme işlemi için arayüz
-            col_sel, col_btn = st.columns([3,1])
-            with col_sel:
-                to_delete = st.selectbox("Silinecek Ürünü Seçin:", current_products.apply(lambda x: f"{x['barkod']} - {x['urun_adi']}", axis=1))
-            with col_btn:
-                st.write(" ") # Hizalama
+            c_sel, c_btn = st.columns([3, 1])
+            with c_sel:
+                prod_to_del = st.selectbox("Silinecek Ürün:", all_products.apply(lambda x: f"{x['barkod']} - {x['urun_adi']}", axis=1))
+            with c_btn:
+                st.write(" ")
                 if st.button("Seçileni Sil", type="primary"):
-                    barcode_to_del = to_delete.split(" - ")[0]
-                    delete_product(barcode_to_del)
-                    st.success("Ürün silindi.")
+                    delete_product_from_db(prod_to_del.split(" - ")[0])
+                    st.success("Silindi!")
                     st.rerun()
             
             st.divider()
-            if st.button("⚠️ Tüm Hafızayı Temizle"):
+            if st.button("🚨 TÜM ÜRÜN HAFIZASINI SIFIRLA"):
                 conn = sqlite3.connect('pazaryeri.db')
                 conn.execute("DELETE FROM products")
                 conn.commit()
                 conn.close()
-                st.warning("Tüm veriler silindi.")
+                st.warning("Tüm ürün verileri temizlendi.")
                 st.rerun()
-                
-            st.dataframe(current_products, use_container_width=True)
+            
+            st.dataframe(all_products, use_container_width=True)
         else:
-            st.info("Hafıza şu an boş.")
+            st.info("Hafıza boş.")
