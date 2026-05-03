@@ -6,7 +6,7 @@ import re
 import requests
 import xml.etree.ElementTree as ET
 
-st.set_page_config(page_title="Pazaryeri Fiyat Motoru v26", layout="wide")
+st.set_page_config(page_title="Pazaryeri Fiyat Motoru v28", layout="wide")
 
 # --- TCMB KUR ÇEKME ---
 def get_tcmb_kurlar():
@@ -88,7 +88,7 @@ if check_password():
                     else: ws_set.append_row(new_row)
                     st.success("Kaydedildi!")
 
-    # --- VERİ YÜKLEME (BOY DÜZELTİLMİŞ KISIM) ---
+    # --- VERİ YÜKLEME (GÜNCELLENMİŞ CM. TESPİTİ) ---
     elif menu == "📥 Veri Yükle":
         st.subheader("📥 Excel'den Buluta Aktar")
         file = st.file_uploader("Excel Dosyası", type=['xlsx'])
@@ -99,28 +99,35 @@ if check_password():
                 for sheet_name in xls.sheet_names:
                     df = pd.read_excel(file, sheet_name=sheet_name, header=None).fillna("")
                     price_col, name_col, size_col = -1, -1, -1
-                    for i in range(min(15, len(df))):
+                    
+                    # Başlık Satırını ve Sütunları Tespit Et
+                    for i in range(min(20, len(df))):
                         row_vals = [str(val).upper().strip() for val in df.iloc[i].values]
                         if "BİRİM FİYATI" in row_vals: price_col = row_vals.index("BİRİM FİYATI")
                         if any(x in row_vals for x in ["MALZEME ADI", "ÜRÜN ADI"]):
                             name_col = next(idx for idx, v in enumerate(row_vals) if v in ["MALZEME ADI", "ÜRÜN ADI"])
-                        if any(x in row_vals for x in ["BOY", "ÖLÇÜ"]):
-                            size_col = next(idx for idx, v in enumerate(row_vals) if v in ["BOY", "ÖLÇÜ"])
+                        # KRİTİK DÜZELTME: "CM." başlığını arıyoruz
+                        if any(x in row_vals for x in ["CM.", "CM", "BOY", "ÖLÇÜ"]):
+                            size_col = next(idx for idx, v in enumerate(row_vals) if v in ["CM.", "CM", "BOY", "ÖLÇÜ"])
                     
                     if price_col != -1 and name_col != -1:
                         for _, row in df.iloc[i+1:].iterrows():
                             raw_name = str(row[name_col]).strip()
                             if not raw_name or raw_name.upper() in ["NAN", ""]: continue
                             
-                            # --- BOY YAKALAMA MANTIĞI ---
-                            # İsimden '12 CM' veya '12CM' gibi bir ifade bul
-                            found_boy = re.search(r'(\d+)\s*CM', raw_name, flags=re.I)
-                            if found_boy:
-                                extracted_boy = found_boy.group(0).upper() # '12 CM'
-                                clean_name = raw_name.replace(found_boy.group(0), "").strip() # İsimden sil
-                            else:
-                                extracted_boy = str(row[size_col]).strip() if size_col != -1 else "-"
-                                clean_name = raw_name.strip()
+                            # BOY BULMA STRATEJİSİ
+                            extracted_boy = "-"
+                            
+                            # 1. Strateji: Başlıkta "CM." bulunan sütunda veri var mı?
+                            if size_col != -1 and str(row[size_col]).strip() != "":
+                                val = str(row[size_col]).strip()
+                                extracted_boy = val if "CM" in val.upper() else f"{val} CM"
+                            
+                            # 2. Strateji: İsim içinde '15 CM' yazıyor mu?
+                            elif re.search(r'(\d+)\s*CM', raw_name, flags=re.I):
+                                match = re.search(r'(\d+)\s*CM', raw_name, flags=re.I)
+                                extracted_boy = match.group(0).upper()
+                                raw_name = raw_name.replace(match.group(0), "").strip()
 
                             try:
                                 f_raw = row[price_col]
@@ -128,7 +135,8 @@ if check_password():
                             except: f_clean = 0.0
                             d_raw = str(row[price_col + 1]).strip().upper() if len(row) > price_col + 1 else "TL"
                             d_tipi = "EUR" if "EUR" in d_raw or "€" in d_raw else ("USD" if "USD" in d_raw or "$" in d_raw else "TL")
-                            all_rows.append([clean_name, extracted_boy, f_clean, d_tipi, sheet_name])
+                            
+                            all_rows.append([raw_name, extracted_boy, f_clean, d_tipi, sheet_name])
                 
                 if all_rows:
                     get_worksheet("Products").append_rows(all_rows, value_input_option='RAW')
@@ -160,11 +168,11 @@ if check_password():
                     df['Satış Fiyatı'] = df.apply(calc_price, axis=1)
                     st.data_editor(df, use_container_width=True, hide_index=True)
 
-    # --- VERİTABANI TEMİZLE ---
+    # --- TEMİZLE ---
     elif menu == "🗑️ Veritabanı Yönetimi":
         st.subheader("🗑️ Veritabanını Temizle")
-        if st.checkbox("Verilerin silinmesini onaylıyorum.") and st.button("Tüm Ürünleri Sil"):
+        if st.checkbox("Onaylıyorum") and st.button("Tümünü Sil"):
             ws_prod = get_worksheet("Products")
             if ws_prod:
                 ws_prod.batch_clear(["A2:E10000"])
-                st.success("Veritabanı temizlendi!")
+                st.success("Temizlendi!")
