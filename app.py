@@ -6,7 +6,7 @@ import re
 import requests
 import xml.etree.ElementTree as ET
 
-st.set_page_config(page_title="Pazaryeri Fiyat Motoru v23", layout="wide")
+st.set_page_config(page_title="Pazaryeri Fiyat Motoru v25", layout="wide")
 
 # --- TCMB KUR ÇEKME FONKSİYONU ---
 def get_tcmb_kurlar():
@@ -54,7 +54,6 @@ def get_worksheet(sheet_name):
     except gspread.exceptions.SpreadsheetNotFound:
         st.error("⚠️ 'Pazaryeri_Veritabani' isimli Google Sheet bulunamadı!")
         return None
-    
     try:
         return sh.worksheet(sheet_name)
     except gspread.exceptions.WorksheetNotFound:
@@ -80,7 +79,7 @@ if check_password():
         if ws_set:
             settings_df = pd.DataFrame(ws_set.get_all_records())
             platforms = ["Trendyol", "Hepsiburada", "Amazon", "N11"]
-            sel_plat = st.selectbox("Platform Seçin", platforms)
+            sel_plat = st.selectbox("Ayar Yapılacak Platform", platforms)
             
             if not settings_df.empty and sel_plat in settings_df['platform'].values:
                 dv = settings_df[settings_df['platform'] == sel_plat].iloc[0].to_list()
@@ -92,7 +91,7 @@ if check_password():
                 if guncel_kur:
                     st.session_state["eur_val"] = guncel_kur["EUR"]
                     st.session_state["usd_val"] = guncel_kur["USD"]
-                    st.success(f"Kurlar güncellendi! (EUR: {guncel_kur['EUR']}, USD: {guncel_kur['USD']})")
+                    st.success(f"Kurlar güncellendi!")
 
             with st.form("set_form"):
                 c1, c2, c3 = st.columns(3)
@@ -150,14 +149,13 @@ if check_password():
                                     d_raw = str(row[price_col + 1]).strip().upper() if len(row) > price_col + 1 else "TL"
                                     d_tipi = "EUR" if "EUR" in d_raw or "€" in d_raw else ("USD" if "USD" in d_raw or "$" in d_raw else "TL")
                                     all_rows.append([str(clean_name), str(boy_val), float(f_clean), str(d_tipi), str(sheet_name)])
-                        
                         if all_rows:
                             ws_prod = get_worksheet("Products")
                             ws_prod.append_rows(all_rows, value_input_option='RAW')
                             st.success(f"✅ {len(all_rows)} ürün eklendi!")
                     except Exception as e: st.error(f"Hata: {e}")
 
-    # --- 3. ARAMA ---
+    # --- 3. ARAMA & ANALİZ ---
     elif menu == "🔍 Arama & Düzenle":
         st.subheader("🔍 Ürün Analizi")
         ws_set = get_worksheet("Settings")
@@ -166,9 +164,16 @@ if check_password():
             s_data = pd.DataFrame(ws_set.get_all_records())
             p_data = pd.DataFrame(ws_prod.get_all_records())
             if not s_data.empty and not p_data.empty:
-                target = st.selectbox("Platform", s_data['platform'])
+                # Platform listesini al ve Trendyol'un indexini bul
+                platform_list = list(s_data['platform'].unique())
+                default_idx = platform_list.index("Trendyol") if "Trendyol" in platform_list else 0
+                
+                # 'label' parametresini boş bırakarak kutu içindeki yazıyı sildik
+                target = st.selectbox("", platform_list, index=default_idx)
+                
+                search = st.text_input("Arama yapın...", placeholder="Ürün adı veya boy yazın...")
+                
                 s = s_data[s_data['platform'] == target].iloc[0]
-                search = st.text_input("Arama...")
                 df = p_data[p_data['urun_adi'].str.contains(search, case=False) | p_data['boy'].astype(str).str.contains(search, case=False)]
                 
                 def calc_price(row):
@@ -184,18 +189,13 @@ if check_password():
                     df['Satış Fiyatı'] = df.apply(calc_price, axis=1)
                     st.data_editor(df, use_container_width=True, hide_index=True)
 
-    # --- 4. VERİTABANI YÖNETİMİ (YENİ EKLENEN BÖLÜM) ---
+    # --- 4. VERİTABANI YÖNETİMİ ---
     elif menu == "🗑️ Veritabanı Yönetimi":
         st.subheader("🗑️ Veritabanını Temizle")
-        st.warning("Dikkat: Bu işlem tüm ürün verilerini Google Sheets üzerinden kalıcı olarak silecektir!")
-        
         onay = st.checkbox("Verilerin silinmesini onaylıyorum.")
         if st.button("Tüm Ürünleri Sil"):
             if onay:
                 ws_prod = get_worksheet("Products")
                 if ws_prod:
-                    # Başlıklar hariç tüm satırları sil (2. satırdan sona kadar)
                     ws_prod.batch_clear(["A2:E10000"])
-                    st.success("Veritabanı başarıyla temizlendi!")
-            else:
-                st.error("Lütfen önce onay kutusunu işaretleyin.")
+                    st.success("Veritabanı temizlendi!")
