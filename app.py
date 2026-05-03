@@ -2,17 +2,17 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import re
+import os
 
-st.set_page_config(page_title="Pro Yönetim", layout="wide")
+st.set_page_config(page_title="Pro Yönetim v3", layout="wide")
 
 def get_db_connection():
     return sqlite3.connect('pazaryeri.db', check_same_thread=False)
 
-# Veritabanı başlangıç ayarı
-conn = get_db_connection()
-conn.execute('''CREATE TABLE IF NOT EXISTS products 
-             (id INTEGER PRIMARY KEY AUTOINCREMENT, barkod TEXT, urun_adi TEXT, maliyet REAL, dosya_adi TEXT)''')
-conn.close()
+# Veritabanını sessizce hazırla
+with get_db_connection() as conn:
+    conn.execute('''CREATE TABLE IF NOT EXISTS products 
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, barkod TEXT, urun_adi TEXT, maliyet REAL, dosya_adi TEXT)''')
 
 def process_excel(uploaded_file):
     try:
@@ -20,132 +20,113 @@ def process_excel(uploaded_file):
         all_data = []
         
         for sheet_name in xls.sheet_names:
-            # Sayfayı ham veri olarak oku (başlık yokmuş gibi)
+            # Sayfayı ham veri olarak oku (hiçbir şeyi başlık kabul etme)
             df_raw = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=None)
             
-            # 1. ADIM: Başlık satırını tespit et
+            # 1. BAŞLIK SATIRINI BUL (Dinamik Tarama)
             header_idx = None
             for i, row in df_raw.iterrows():
-                # Satırdaki tüm hücreleri yanyana koy ve içinde kritik kelimeleri ara
-                row_text = " ".join([str(val).upper() for val in row.values if pd.notna(val)])
-                if "MALZEME ADI" in row_text or "BİRİM FİYAT" in row_text:
+                row_str = " ".join([str(val).upper() for val in row.values if pd.notna(val)])
+                if "MALZEME ADI" in row_str or "BİRİM FİYAT" in row_str or "FİYAT" in row_str:
                     header_idx = i
                     break
             
+            # Eğer başlık satırı bulunamazsa zorla 3. satırı (index 3) dene
             if header_idx is None:
-                continue
+                header_idx = 3 
 
-            # 2. ADIM: Sayfayı o satırdan itibaren oku
+            # Veriyi o satırdan itibaren al
             df = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=header_idx)
             
-            # Sütun isimlerini temizle (Sadece string olanları büyük harfe çevir)
+            # Sütun isimlerini normalize et
             df.columns = [str(c).strip().upper() for c in df.columns]
 
-            # 3. ADIM: Esnek Sütun Eşleştirme (İsmin İÇİNDE geçiyor mu?)
+            # 2. ESNEK EŞLEŞTİRME
             col_map = {}
             for col in df.columns:
-                # "MALZEME ADI " veya "MALZEME ADI.1" gibi durumları yakalar
-                if "MALZEME ADI" in col or "URUN ADI" in col or "ÜRÜN ADI" in col:
+                if any(x in col for x in ["MALZEME ADI", "ÜRÜN", "URUN", "AD"]):
                     col_map[col] = "urun_adi"
-                elif "BİRİM FİYAT" in col or "BIRIM FIYAT" in col or "MALİYET" in col:
+                elif any(x in col for x in ["FİYAT", "FIYAT", "MALİYET", "BİRİM"]):
                     col_map[col] = "maliyet"
-                elif "CM" in col or "BOYUT" in col:
+                elif any(x in col for x in ["CM", "BOYUT"]):
                     col_map[col] = "boyut"
 
             df = df.rename(columns=col_map)
 
-            # 4. ADIM: Kontrol ve Temizlik
-            # En azından isim ve fiyat sütununu bulmuş olmalıyız
+            # 3. BAŞARISIZ OLURSA SÜTUN SIRASINA GÜVEN (A=0, B=1...)
+            if "urun_adi" not in df.columns and df.shape[1] >= 5:
+                df.rename(columns={df.columns[4]: "urun_adi"}, inplace=True) # E Sütunu
+            if "maliyet" not in df.columns and df.shape[1] >= 15:
+                df.rename(columns={df.columns[14]: "maliyet"}, inplace=True) # O Sütunu
+
+            # Temel sütunlar hala yoksa bu sayfayı pas geç
             if "urun_adi" not in df.columns or "maliyet" not in df.columns:
                 continue
-                
-            # Sadece ihtiyacımız olan sütunları seç (boyut opsiyonel)
-            cols_to_keep = [c for c in ["urun_adi", "maliyet", "boyut"] if c in df.columns]
-            df = df[cols_to_keep].copy()
-            
-            # İsim veya fiyatı boş olan satırları at
-            df = df.dropna(subset=['urun_adi', 'maliyet'])
 
-            # 5. ADIM: Fiyat Temizleme
+            # Veri Temizliği
+            df = df.dropna(subset=['urun_adi', 'maliyet']).copy()
+            
             def clean_price(val):
                 try:
-                    if pd.isna(val): return 0.0
-                    # Rakam, nokta ve virgül dışındaki her şeyi (TL vb.) sil
                     s = str(val).replace('.', '').replace(',', '.')
                     res = re.findall(r"[-+]?\d*\.\d+|\d+", s)
                     return float(res[0]) if res else 0.0
                 except: return 0.0
 
             df['maliyet'] = df['maliyet'].apply(clean_price)
-            df = df[df['maliyet'] > 0] # 0 olanları ele
+            df = df[df['maliyet'] > 0]
 
-            # Boyutu isme ekle
+            # Boyut ekleme
             if 'boyut' in df.columns:
                 df['urun_adi'] = df['urun_adi'].astype(str) + " (" + df['boyut'].astype(str) + " CM)"
 
-            all_data.append(df)
+            all_data.append(df[['urun_adi', 'maliyet']])
 
         if not all_data: return None
 
         final_df = pd.concat(all_data, ignore_index=True)
         final_df['dosya_adi'] = uploaded_file.name
-        # Benzersiz barkod (yükleme zamanına göre)
-        import time
-        ts = int(time.time())
-        final_df['barkod'] = [f"BRK-{ts}-{i}" for i in range(len(final_df))]
+        final_df['barkod'] = [f"BRK-{i+1000}" for i in range(len(final_df))]
         
-        # Veritabanına Yazma
-        db_conn = get_db_connection()
-        final_df[['barkod', 'urun_adi', 'maliyet', 'dosya_adi']].to_sql('products', db_conn, if_exists='append', index=False)
-        db_conn.close()
+        with get_db_connection() as db_conn:
+            final_df[['barkod', 'urun_adi', 'maliyet', 'dosya_adi']].to_sql('products', db_conn, if_exists='append', index=False)
         
         return len(final_df)
     except Exception as e:
-        # Hata detayını Streamlit üzerinde göster
-        st.error(f"Teknik bir hata oluştu: {str(e)}")
+        st.error(f"Sistem Hatası: {str(e)}")
         return None
 
-# --- STREAMLIT ARAYÜZÜ ---
-st.title("💎 Pro Yönetim v2")
-tab1, tab2 = st.tabs(["📊 Analiz", "📁 Veri Yükleme"])
+# --- ARAYÜZ ---
+st.title("💎 Pro Yönetim Arayüzü")
 
-with tab2:
-    st.markdown("### Excel Veri Yükleme")
-    st.info("Sistem; 'MALZEME ADI' ve 'BİRİM FİYATI' içeren sütunları otomatik bulur.")
-    
-    uploaded_file = st.file_uploader("Fiyat Listesi Seçin (.xlsx)", type=['xlsx'])
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("Verileri Kaydet", use_container_width=True):
-            if uploaded_file:
-                with st.spinner("İşleniyor..."):
-                    count = process_excel(uploaded_file)
-                    if count:
-                        st.success(f"Başarılı! {count} ürün sisteme eklendi.")
-                    else:
-                        st.error("Hata: Gerekli sütun başlıkları bulunamadı.")
+tab_analiz, tab_yukle = st.tabs(["📊 Analiz", "📁 Veri Yükleme"])
+
+with tab_yukle:
+    st.info("İpucu: Excel dosyanızda 'MALZEME ADI' ve 'BİRİM FİYATI' başlıklarının olduğundan emin olun.")
+    file = st.file_uploader("Excel Yükle", type=['xlsx'])
+    if st.button("Veritabanına İşle", use_container_width=True):
+        if file:
+            count = process_excel(file)
+            if count:
+                st.success(f"İşlem Başarılı: {count} ürün eklendi.")
+                st.rerun()
             else:
-                st.warning("Lütfen bir dosya yükleyin.")
-    
-    with col2:
-        if st.button("⚠️ Veritabanını Sıfırla", use_container_width=True):
-            db_conn = get_db_connection()
-            db_conn.execute("DELETE FROM products")
-            db_conn.commit()
-            db_conn.close()
-            st.warning("Tüm veriler silindi.")
-
-with tab1:
-    st.markdown("### Kayıtlı Ürünler")
-    db_conn = get_db_connection()
-    try:
-        df_list = pd.read_sql_query("SELECT * FROM products ORDER BY id DESC", db_conn)
-        if not df_list.empty:
-            st.dataframe(df_list, use_container_width=True)
+                st.error("Hata: Sütunlar otomatik eşleştirilemedi. Lütfen başlıkları kontrol edin.")
         else:
-            st.info("Veritabanı şu an boş.")
-    except:
-        st.error("Veritabanı hatası!")
-    finally:
-        db_conn.close()
+            st.warning("Dosya seçilmedi.")
+
+    if st.button("🗑️ Tüm Verileri Sıfırla"):
+        with get_db_connection() as conn:
+            conn.execute("DELETE FROM products")
+        st.warning("Veritabanı boşaltıldı.")
+
+with tab_analiz:
+    with get_db_connection() as conn:
+        try:
+            df_view = pd.read_sql_query("SELECT * FROM products ORDER BY id DESC", conn)
+            if not df_view.empty:
+                st.dataframe(df_view, use_container_width=True)
+            else:
+                st.write("Henüz veri yüklenmemiş.")
+        except:
+            st.write("Veritabanı henüz hazır değil.")
