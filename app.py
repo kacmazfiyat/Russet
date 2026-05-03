@@ -4,184 +4,103 @@ import gspread
 from google.oauth2.service_account import Credentials
 import re
 
-st.set_page_config(page_title="Pazaryeri Fiyat Motoru v21", layout="wide")
+st.set_page_config(page_title="Pazaryeri Fiyat Motoru v41", layout="wide")
 
-# --- GÜVENLİK ---
-def check_password():
-    if "password_correct" not in st.session_state:
-        st.session_state["password_correct"] = False
-    if not st.session_state["password_correct"]:
-        st.title("🔐 Pro Yönetim Giriş")
-        pwd = st.text_input("Lütfen Giriş Şifresini Giriniz", type="password")
-        if st.button("Giriş Yap") or pwd:
-            if pwd == st.secrets["access_password"]:
-                st.session_state["password_correct"] = True
-                st.rerun()
-            else:
-                st.error("❌ Hatalı Şifre!")
-        return False
-    return True
+# --- HESAPLAMA MOTORU (SADE VE STABİL) ---
+def calculate_final_price(maliyet, doviz, s):
+    try:
+        # 1. Ham Maliyeti Kurla Çarp (TL Liste Fiyatı)
+        m_tl = float(maliyet)
+        if doviz == "EUR": m_tl *= float(s.get('eur', 35))
+        elif doviz == "USD": m_tl *= float(s.get('usd', 32))
+        
+        # 2. KDV Ayarı ve Net Maliyet
+        kdv_orani = float(s.get('kdv', 20)) / 100
+        # Eğer maliyet KDV dahilse, net maliyeti bul (Giderler netten eklenir)
+        m_net = m_tl / (1 + kdv_orani) if s.get('kdv_dahil') == 1 else m_tl
+        
+        # 3. Giderler (Kargo ve Hizmet netleştirilerek eklenir)
+        giderler = m_net + (float(s.get('kargo', 0))/1.2) + (float(s.get('hizmet', 0))/1.2)
+        
+        # 4. Komisyon ve Kar Paydası
+        payda = 1 - ((float(s.get('komisyon', 0)) + float(s.get('kar', 0)))/100)
+        
+        # 5. Final Satış Fiyatı (KDV geri eklenerek)
+        satis_fiyati = (giderler / payda) * (1 + kdv_orani) if payda > 0 else 0
+        
+        return round(m_tl, 2), round(satis_fiyati, 2)
+    except:
+        return 0.0, 0.0
 
 # --- GOOGLE SHEETS BAĞLANTISI ---
 @st.cache_resource
 def get_gsheet_client():
-    scope = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-    creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scope)
+    creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], 
+            scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
     return gspread.authorize(creds)
 
-def get_worksheet(sheet_name):
+def get_data(sheet_name):
     client = get_gsheet_client()
-    try:
-        sh = client.open("Pazaryeri_Veritabani")
-    except gspread.exceptions.SpreadsheetNotFound:
-        st.error("⚠️ 'Pazaryeri_Veritabani' isimli Google Sheet bulunamadı!")
-        return None
+    sh = client.open("Pazaryeri_Veritabani")
+    return sh.worksheet(sheet_name)
+
+# --- ANA PROGRAM ---
+# (Şifre kontrolü kısmını burada varsayıyoruz)
+
+menu = st.sidebar.radio("Menü", ["🔍 Arama & Düzenle", "⚙️ Ayarlar"])
+
+if menu == "🔍 Arama & Düzenle":
+    st.subheader("🔍 Satış Fiyatı Analizi")
     
     try:
-        return sh.worksheet(sheet_name)
-    except gspread.exceptions.WorksheetNotFound:
-        if sheet_name == "Products":
-            ws = sh.add_worksheet(title="Products", rows="10000", cols="10")
-            ws.append_row(["urun_adi", "boy", "maliyet", "doviz", "sayfa_adi"])
-            return ws
-        elif sheet_name == "Settings":
-            ws = sh.add_worksheet(title="Settings", rows="100", cols="15")
-            ws.append_row(["platform", "komisyon", "kargo", "hizmet", "kar", "kdv", "kdv_dahil", "eur", "usd"])
-            return ws
-    return None
-
-# --- ANA UYGULAMA ---
-if check_password():
-    st.sidebar.success("Oturum Açıldı")
-    menu = st.sidebar.radio("Menü", ["🔍 Arama & Düzenle", "⚙️ Ayarlar", "📥 Veri Yükle"])
-
-    # --- 1. AYARLAR ---
-    if menu == "⚙️ Ayarlar":
-        st.subheader("⚙️ Platform ve Kur Ayarları")
-        ws_set = get_worksheet("Settings")
-        if ws_set:
-            settings_df = pd.DataFrame(ws_set.get_all_records())
-            platforms = ["Trendyol", "Hepsiburada", "Amazon", "N11"]
-            sel_plat = st.selectbox("Platform Seçin", platforms)
-            
-            if not settings_df.empty and sel_plat in settings_df['platform'].values:
-                dv = settings_df[settings_df['platform'] == sel_plat].iloc[0].to_list()
-            else:
-                dv = [sel_plat, 20.0, 80.0, 15.0, 30.0, 20.0, 0, 36.50, 33.50]
-
-            with st.form("set_form"):
-                c1, c2, c3 = st.columns(3)
-                kom = c1.number_input("Komisyon (%)", value=float(dv[1]))
-                kargo = c2.number_input("Kargo (TL)", value=float(dv[2]))
-                hizmet = c3.number_input("Hizmet (TL)", value=float(dv[3]))
-                kar = c1.number_input("Kâr (%)", value=float(dv[4]))
-                kdv = c2.selectbox("KDV (%)", [0, 1, 10, 20], index=3)
-                kdv_d = c3.radio("Maliyet Tipi", ["KDV Hariç", "KDV Dahil"], index=int(dv[6]))
-                st.divider()
-                eur_k = st.number_input("EURO Kuru", value=float(dv[7]))
-                usd_k = st.number_input("USD Kuru", value=float(dv[8]))
-                
-                if st.form_submit_button("Ayarları Kaydet"):
-                    new_row = [sel_plat, kom, kargo, hizmet, kar, kdv, (1 if kdv_d=="KDV Dahil" else 0), eur_k, usd_k]
-                    cell = ws_set.find(sel_plat)
-                    if cell:
-                        ws_set.update(range_name=f"A{cell.row}:I{cell.row}", values=[new_row])
-                    else:
-                        ws_set.append_row(new_row)
-                    st.success("Ayarlar başarıyla kaydedildi!")
-
-    # --- 2. VERİ YÜKLEME ---
-    elif menu == "📥 Veri Yükle":
-        st.subheader("📥 Excel Analizi ve Buluta Aktarım")
-        file = st.file_uploader("Excel Dosyası Seçin", type=['xlsx'])
-        if st.button("Aktarımı Başlat"):
-            if file:
-                with st.spinner("Excel işleniyor..."):
-                    try:
-                        xls = pd.ExcelFile(file)
-                        all_rows = []
-                        for sheet_name in xls.sheet_names:
-                            df = pd.read_excel(file, sheet_name=sheet_name, header=None)
-                            df = df.fillna("") # NaN hatasını önlemek için ilk adım
-                            
-                            price_col, name_col, size_col = -1, -1, -1
-                            # ESKİ ÖZELLİK: Dinamik Başlık Bulma
-                            search_limit = min(15, len(df))
-                            for i in range(search_limit):
-                                row_vals = [str(val).upper().strip() for val in df.iloc[i].values]
-                                if "BİRİM FİYATI" in row_vals: price_col = row_vals.index("BİRİM FİYATI")
-                                if any(x in row_vals for x in ["MALZEME ADI", "ÜRÜN ADI"]):
-                                    name_col = next(idx for idx, v in enumerate(row_vals) if v in ["MALZEME ADI", "ÜRÜN ADI"])
-                                if any(x in row_vals for x in ["BOY", "ÖLÇÜ"]):
-                                    size_col = next(idx for idx, v in enumerate(row_vals) if v in ["BOY", "ÖLÇÜ"])
-                            
-                            if price_col != -1 and name_col != -1:
-                                for _, row in df.iloc[i+1:].iterrows():
-                                    raw_name = str(row[name_col]).strip()
-                                    if not raw_name or raw_name.upper() == "NAN" or raw_name == "": continue
-                                    
-                                    # ESKİ ÖZELLİK: CM Temizleme ve Boyut Ayırma
-                                    clean_name = re.sub(r'\d+\s*CM', '', raw_name, flags=re.I).strip()
-                                    boy_val = str(row[size_col]).strip() if size_col != -1 else "-"
-                                    
-                                    # ESKİ ÖZELLİK: Sayı ve Döviz Analizi
-                                    fiyat_raw = row[price_col]
-                                    try:
-                                        if isinstance(fiyat_raw, str):
-                                            f_clean = float(fiyat_raw.replace('.', '').replace(',', '.'))
-                                        else:
-                                            f_clean = float(fiyat_raw)
-                                    except: f_clean = 0.0
-
-                                    doviz_raw = str(row[price_col + 1]).strip().upper() if len(row) > price_col + 1 else "TL"
-                                    d_tipi = "EUR" if "EUR" in doviz_raw or "€" in doviz_raw else ("USD" if "USD" in doviz_raw or "$" in doviz_raw else "TL")
-                                    
-                                    # GÜVENLİ VERİ EKLEME (JSON Hatasını Önler)
-                                    all_rows.append([str(clean_name), str(boy_val), float(f_clean), str(d_tipi), str(sheet_name)])
-                        
-                        if all_rows:
-                            ws_prod = get_worksheet("Products")
-                            # Mevcut verileri temizlemek istersen: ws_prod.clear() (Başlıklar kalacak şekilde ayarlanmalı)
-                            ws_prod.append_rows(all_rows, value_input_option='RAW')
-                            st.success(f"✅ {len(all_rows)} ürün buluta eklendi!")
-                        else:
-                            st.error("Excel'de 'BİRİM FİYATI' ve 'ÜRÜN ADI' sütunları bulunamadı.")
-                    except Exception as e:
-                        st.error(f"Hata detayı: {str(e)}")
-            else:
-                st.warning("Lütfen bir Excel dosyası yükleyin.")
-
-    # --- 3. ARAMA ---
-    elif menu == "🔍 Arama & Düzenle":
-        st.subheader("🔍 Ürün Analizi")
-        ws_set = get_worksheet("Settings")
-        ws_prod = get_worksheet("Products")
+        ws_prod = get_data("Products")
+        ws_set = get_data("Settings")
         
-        if ws_set and ws_prod:
-            s_data = pd.DataFrame(ws_set.get_all_records())
-            p_data = pd.DataFrame(ws_prod.get_all_records())
+        p_df = pd.DataFrame(ws_prod.get_all_records())
+        s_df = pd.DataFrame(ws_set.get_all_records())
+        
+        if not p_df.empty and not s_df.empty:
+            target_plat = st.selectbox("Platform", s_df['platform'].unique())
+            s = s_df[s_df['platform'] == target_plat].iloc[0].to_dict()
             
-            if s_data.empty:
-                st.info("Lütfen önce Ayarlar'dan platform verilerini kaydedin.")
-            elif p_data.empty:
-                st.info("Henüz ürün verisi yok. Önce Excel yükleyin.")
-            else:
-                target = st.selectbox("Hesaplama Yapılacak Platform", s_data['platform'])
-                s = s_data[s_data['platform'] == target].iloc[0]
-                search = st.text_input("Ürün adı veya boy ara...")
+            search = st.text_input("Ürün veya Boy Ara...", "")
+            
+            # Ürünleri filtrele ve iskonto sütunu varsa temizle
+            df = p_df[p_df['urun_adi'].str.contains(search, case=False) | p_df['boy'].astype(str).str.contains(search, case=False)].copy()
+            if 'iskonto' in df.columns:
+                df = df.drop(columns=['iskonto'])
+            
+            if not df.empty:
+                # Hesaplama
+                res = df.apply(lambda x: calculate_final_price(x['maliyet'], x['doviz'], s), axis=1)
+                df['Maliyet (TL)'], df['Satış Fiyatı'] = zip(*res)
                 
-                df = p_data[p_data['urun_adi'].str.contains(search, case=False) | p_data['boy'].astype(str).str.contains(search, case=False)]
-                
-                def calc_price(row):
-                    m = float(row['maliyet'])
-                    if row['doviz'] == "EUR": m *= float(s['eur'])
-                    elif row['doviz'] == "USD": m *= float(s['usd'])
-                    m_net = m / (1 + (s['kdv']/100)) if s['kdv_dahil'] == 1 else m
-                    # Kargo ve Hizmet bedellerini de KDV'den arındırıp maliyete ekliyoruz
-                    gider = m_net + (float(s['kargo'])/1.2) + (float(s['hizmet'])/1.2)
-                    payda = 1 - ((float(s['komisyon']) + float(s['kar']))/100)
-                    return round((gider/payda)*(1+(s['kdv']/100)), 2) if payda > 0 else 0
+                st.info(f"📊 **{target_plat}** Ayarları: Komisyon: %{s['komisyon']} | Kâr: %{s['kar']} | Kargo: {s['kargo']} TL")
 
-                if not df.empty:
-                    df['Satış Fiyatı'] = df.apply(calc_price, axis=1)
-                    st.data_editor(df, use_container_width=True, hide_index=True)
+                # TABLO GÖRÜNÜMÜ
+                edited_df = st.data_editor(
+                    df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "urun_adi": "Ürün Adı",
+                        "maliyet": "Liste Fiyatı (Dövizli)",
+                        "doviz": "Kur",
+                        "Maliyet (TL)": st.column_config.NumberColumn("Maliyet (TL)", format="%.2f ₺"),
+                        "Satış Fiyatı": st.column_config.NumberColumn("Satış Fiyatı", format="%.2f ₺"),
+                        "boy": "Ölçü",
+                        "sayfa_adi": None
+                    },
+                    disabled=["Maliyet (TL)", "Satış Fiyatı"]
+                )
+                
+                if st.button("Değişiklikleri Kaydet"):
+                    # Sadece veritabanında olması gereken ana kolonları filtrele
+                    valid_cols = ['urun_adi', 'boy', 'maliyet', 'doviz', 'sayfa_adi']
+                    save_data = edited_df[valid_cols]
+                    ws_prod.update(range_name='A1', values=[save_data.columns.tolist()] + save_data.values.tolist())
+                    st.success("Bulut veritabanı başarıyla güncellendi!")
+                    st.rerun()
+
+    except Exception as e:
+        st.error(f"Bir hata oluştu: {e}")
