@@ -7,7 +7,7 @@ def create_connection():
 def init_db():
     conn = create_connection()
     cur = conn.cursor()
-    # kdv_dahil sütunu eklendi (1: Dahil, 0: Hariç)
+    # Tüm değişkenleri içeren tablo yapısı
     cur.execute('''CREATE TABLE IF NOT EXISTS marketplaces (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT, 
@@ -45,12 +45,5 @@ def delete_marketplace(mp_id):
     conn = create_connection()
     cur = conn.cursor()
     cur.execute("DELETE FROM marketplaces WHERE id=?", (mp_id,))
-    conn.commit()
-    conn.close()
-
-def clear_all_marketplaces():
-    conn = create_connection()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM marketplaces")
     conn.commit()
     conn.close()

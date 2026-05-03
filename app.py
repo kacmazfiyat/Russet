@@ -1,10 +1,10 @@
 import streamlit as st
 import pandas as pd
-from database import init_db, get_all_marketplaces, save_marketplace, delete_marketplace, clear_all_marketplaces
+from database import init_db, get_all_marketplaces, save_marketplace, delete_marketplace
 from excel_reader import process_excel
 
-# Sayfa Yapılandırması
-st.set_page_config(page_title="Pro Yönetim v2", layout="wide")
+# Sayfa Ayarları
+st.set_page_config(page_title="Pro Yönetim v3", layout="wide")
 init_db()
 
 # --- SIDEBAR ---
@@ -17,28 +17,37 @@ if menu == "⚙️ Pazaryeri Ayarları":
     st.header("Pazaryeri Yapılandırması")
     
     with st.expander("➕ Yeni Pazaryeri Ekle", expanded=True):
-        with st.form("yeni_mp"):
-            name = st.text_input("Pazaryeri Adı")
+        with st.form("yeni_mp_form"):
+            name = st.text_input("Pazaryeri Adı (Örn: TRENDYOL)")
             
-            # KDV Tipi Seçimi
-            kdv_tipi = st.toggle("KDV Satış Fiyatına Dahil mi?", value=True)
-            if kdv_tipi:
-                st.caption("ℹ️ Bu pazaryerinde fiyatlar KDV dahil hesaplanır.")
-            else:
-                st.caption("⚠️ Bu pazaryerinde fiyatlar KDV hariç hesaplanır.")
-
+            # KDV Durumu (En Üstte)
+            kdv_dahil_mi = st.toggle("KDV Satış Fiyatına Dahil mi?", value=True)
+            st.caption("Açık: Fiyatın içinden KDV düşer. Kapalı: Fiyatın üzerine KDV ekler.")
+            
+            st.divider()
+            
+            # Tüm Gider Kalemleri (3'lü kolonlar halinde)
             c1, c2, c3 = st.columns(3)
-            komisyon = c1.number_input("Komisyon (%)", value=20.0)
-            kargo = c2.number_input("Kargo (TL)", value=85.0)
-            kdv = c3.number_input("KDV (%)", value=20.0)
+            komisyon = c1.number_input("Komisyon (%)", min_value=0.0, value=20.0)
+            kargo = c2.number_input("Kargo Ücreti (TL)", min_value=0.0, value=85.0)
+            kupon = c3.number_input("Kupon/İndirim (TL)", min_value=0.0, value=0.0)
+            
+            c4, c5, c6 = st.columns(3)
+            kdv_orani = c4.number_input("KDV Oranı (%)", min_value=0.0, value=20.0)
+            stopaj = c5.number_input("Stopaj (%)", min_value=0.0, value=0.0)
+            hizmet = c6.number_input("Hizmet Bedeli (TL)", min_value=0.0, value=0.0)
+            
+            ekstra = st.number_input("Ekstra Gider (TL)", min_value=0.0, value=0.0)
             
             submitted = st.form_submit_button("Kaydet")
             if submitted:
                 save_marketplace({
                     "name": name.upper(), "komisyon": komisyon, "kargo": kargo,
-                    "kupon": 0, "stopaj": 0, "kdv": kdv, "hizmet": 0, 
-                    "ekstra": 0, "varsayilan": 0, "kdv_dahil": 1 if kdv_tipi else 0
+                    "kupon": kupon, "stopaj": stopaj, "kdv": kdv_orani, 
+                    "hizmet": hizmet, "ekstra": ekstra, "varsayilan": 0,
+                    "kdv_dahil": 1 if kdv_dahil_mi else 0
                 })
+                st.success(f"{name} kaydedildi!")
                 st.rerun()
 
     st.divider()
@@ -46,32 +55,35 @@ if menu == "⚙️ Pazaryeri Ayarları":
     mps = get_all_marketplaces()
 
     if not mps.empty:
-        # Tablo Gösterimi
+        # Tabloyu tüm sütunlarla göster
         st.dataframe(mps, use_container_width=True)
         
-        # Seçili Silme Bölümü
+        # SEÇİLİYİ SİLME
         st.write("### 🗑️ Kayıt Yönetimi")
-        col_s1, col_s2 = st.columns([3, 1])
-        with col_s1:
-            mps['label'] = mps['id'].astype(str) + " - " + mps['name'] + (" (Dahil)" if mps['kdv_dahil'].iloc[0] == 1 else " (Hariç)")
+        col_del1, col_del2 = st.columns([3, 1])
+        with col_del1:
+            # Görseldeki gibi isim karışıklığı olmaması için ID ve KDV bilgisini etikete ekledim
+            mps['label'] = (mps['id'].astype(str) + " - " + mps['name'] + 
+                           (" (KDV Dahil)" if mps['kdv_dahil'].any() == 1 else " (KDV Hariç)"))
             secilen = st.selectbox("Silmek istediğiniz kaydı seçin:", mps['label'].tolist())
             target_id = int(secilen.split(" - ")[0])
-        with col_s2:
-            st.write(" ") # Boşluk
-            if st.button("Seçiliyi Sil", type="primary"):
+        with col_del2:
+            st.write(" ") # Hizalama
+            if st.button("Seçili Pazaryerini Sil", type="primary", use_container_width=True):
                 delete_marketplace(target_id)
+                st.warning("Kayıt veritabanından silindi.")
                 st.rerun()
     else:
-        st.info("Kayıt yok.")
+        st.info("Henüz tanımlı bir pazaryeri yok.")
 
 # --- VERİ YÜKLEME ---
 elif menu == "📂 Veri Yükleme":
     st.header("Excel Veri Yönetimi")
     file = st.file_uploader("Fiyat Listesi (.xlsx)", type="xlsx")
     if file:
-        df = process_excel(file)
+        df = process_excel(file) # Dinamik başlık bulan fonksiyonu kullanır
         if not df.empty:
-            st.success(f"{len(df)} ürün yüklendi.")
+            st.success(f"Başarılı! {len(df)} ürün ve kategorileri okundu.")
             st.dataframe(df)
         else:
-            st.error("Excel okunamadı. Başlıkların 3. satırda (MALZEME ADI, BİRİM FİYATI) olduğundan emin olun.")
+            st.error("Excel formatı çözülemedi! Başlıkların 'MALZEME ADI' ve 'BİRİM FİYATI' olduğundan emin olun.")
