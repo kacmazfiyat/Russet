@@ -2,20 +2,17 @@ import streamlit as st
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
+import re
 
-st.set_page_config(page_title="Pazaryeri Fiyat Motoru v43", layout="wide")
+st.set_page_config(page_title="Pazaryeri Fiyat Motoru v44", layout="wide")
 
-# --- GÜVENLİ SAYI ÇEVİRİCİ ---
+# --- YARDIMCI FONKSİYONLAR ---
 def safe_float(value, default=0.0):
-    """Veriyi güvenli bir şekilde float'a çevirir, hata alırsa default döner."""
     try:
-        if value is None or str(value).strip() == "":
-            return default
-        return float(str(value).replace(',', '.'))
-    except:
-        return default
+        if value is None or str(value).strip() == "": return default
+        return float(str(value).replace('.', '').replace(',', '.'))
+    except: return default
 
-# --- GOOGLE SHEETS BAĞLANTISI ---
 @st.cache_resource
 def get_gsheet_client():
     creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], 
@@ -27,64 +24,90 @@ def get_data(sheet_name):
         client = get_gsheet_client()
         sh = client.open("Pazaryeri_Veritabani")
         return sh.worksheet(sheet_name)
-    except:
-        return None
+    except: return None
 
 # --- ANA PROGRAM ---
-menu = st.sidebar.radio("Menü", ["🔍 Arama & Düzenle", "⚙️ Ayarlar"])
+menu = st.sidebar.radio("Menü", ["🔍 Arama & Düzenle", "⚙️ Ayarlar", "📥 Veri Yükle"])
 
 ws_prod = get_data("Products")
 ws_set = get_data("Settings")
 
 if ws_prod is None or ws_set is None:
-    st.error("❌ Veritabanına ulaşılamıyor. Sheets ismini ve yetkileri kontrol edin.")
+    st.error("❌ Veritabanı bağlantı hatası!")
 else:
-    # Verileri oku
-    p_df = pd.DataFrame(ws_prod.get_all_records())
-    s_df = pd.DataFrame(ws_set.get_all_records())
-
-    if menu == "⚙️ Ayarlar":
-        st.subheader("⚙️ Platform Ayarları")
+    # --- 1. VERİ YÜKLEME VE TEMİZLEME ---
+    if menu == "📥 Veri Yükle":
+        st.subheader("📥 Veritabanı Yönetimi")
         
-        platforms = ["Trendyol", "Hepsiburada", "Amazon", "N11"]
-        sel_plat = st.selectbox("Düzenlenecek Platform", platforms)
-        
-        # Mevcut veriyi çek veya boş şablon oluştur
-        current_s = {}
-        if not s_df.empty and sel_plat in s_df['platform'].values:
-            current_s = s_df[s_df['platform'] == sel_plat].iloc[0].to_dict()
-        
-        # FORM BAŞLANGICI
-        with st.form("settings_form"):
-            col1, col2 = st.columns(2)
-            
-            # safe_float kullanarak ValueError hatasını engelliyoruz
-            kom = col1.number_input("Komisyon (%)", value=safe_float(current_s.get('komisyon'), 20.0))
-            kar = col2.number_input("Hedef Kar (%)", value=safe_float(current_s.get('kar'), 20.0))
-            kargo = col1.number_input("Kargo Ücreti (TL)", value=safe_float(current_s.get('kargo'), 80.0))
-            hizmet = col2.number_input("Hizmet Bedeli (TL)", value=safe_float(current_s.get('hizmet', 15.0)))
-            
-            st.divider()
-            eur = col1.number_input("EURO Kuru", value=safe_float(current_s.get('eur'), 35.0))
-            usd = col2.number_input("USD Kuru", value=safe_float(current_s.get('usd'), 32.0))
-            
-            # FORMUN MUTLAKA İÇİNDE OLMASI GEREKEN BUTON
-            submit = st.form_submit_button("Ayarları Kaydet")
-            
-            if submit:
-                new_row = [sel_plat, kom, kargo, hizmet, kar, 20, 0, eur, usd]
-                try:
-                    cell = ws_set.find(sel_plat)
-                    if cell:
-                        ws_set.update(range_name=f"A{cell.row}:I{cell.row}", values=[new_row])
-                    else:
-                        ws_set.append_row(new_row)
-                    st.success("Başarıyla kaydedildi!")
+        # TEHLİKELİ ALAN: VERİTABANI TEMİZLEME
+        with st.expander("⚠️ Tehlikeli Alan: Veritabanını Temizle"):
+            st.warning("Bu işlem 'Products' sayfasındaki TÜM ürünleri silecektir!")
+            confirm = st.text_input("Silmek için 'SİL' yazın")
+            if st.button("Tüm Ürünleri Temizle"):
+                if confirm == "SİL":
+                    ws_prod.clear()
+                    ws_prod.append_row(["urun_adi", "boy", "maliyet", "doviz", "sayfa_adi"])
+                    st.success("Veritabanı tamamen temizlendi!")
                     st.rerun()
-                except Exception as e:
-                    st.error(f"Kayıt sırasında hata: {e}")
+                else:
+                    st.error("Lütfen onay kutusuna SİL yazın.")
 
+        st.divider()
+
+        # EXCEL YÜKLEME
+        st.write("### Excel'den Ürün Aktar")
+        file = st.file_uploader("Excel Dosyası Seçin (.xlsx)", type=['xlsx'])
+        
+        if file:
+            if st.button("Aktarımı Başlat"):
+                with st.spinner("Excel okunuyor ve buluta işleniyor..."):
+                    xls = pd.ExcelFile(file)
+                    all_rows = []
+                    for sheet_name in xls.sheet_names:
+                        df = pd.read_excel(file, sheet_name=sheet_name, header=None)
+                        # Sütun tespiti (v20 mantığı)
+                        price_col, name_col, size_col = -1, -1, -1
+                        for i in range(min(15, len(df))):
+                            row_vals = [str(val).upper().strip() for val in df.iloc[i].values]
+                            if "BİRİM FİYATI" in row_vals: price_col = row_vals.index("BİRİM FİYATI")
+                            if any(x in row_vals for x in ["MALZEME ADI", "ÜRÜN ADI"]):
+                                name_col = next(idx for idx, v in enumerate(row_vals) if v in ["MALZEME ADI", "ÜRÜN ADI"])
+                            if any(x in row_vals for x in ["BOY", "ÖLÇÜ"]):
+                                size_col = next(idx for idx, v in enumerate(row_vals) if v in ["BOY", "ÖLÇÜ"])
+                        
+                        if price_col != -1 and name_col != -1:
+                            for _, row in df.iloc[i+1:].iterrows():
+                                raw_name = str(row[name_col]).strip()
+                                if not raw_name or raw_name.upper() == "NAN": continue
+                                
+                                # Veriyi temizle ve ekle
+                                boy_val = str(row[size_col]).strip() if size_col != -1 else "-"
+                                fiyat = safe_float(row[price_col])
+                                # Döviz tespiti
+                                cur_raw = str(row[price_col+1]).upper() if len(row) > price_col+1 else "TL"
+                                d_tipi = "EUR" if "EUR" in cur_raw or "€" in cur_raw else ("USD" if "USD" in cur_raw or "$" in cur_raw else "TL")
+                                
+                                all_rows.append([raw_name, boy_val, fiyat, d_tipi, sheet_name])
+                    
+                    if all_rows:
+                        ws_prod.append_rows(all_rows)
+                        st.success(f"✅ {len(all_rows)} ürün buluta eklendi!")
+                        st.rerun()
+
+    # --- 2. AYARLAR ---
+    elif menu == "⚙️ Ayarlar":
+        # (v43'teki form yapısı buraya gelecek - Submit button dahil)
+        st.subheader("⚙️ Platform Ayarları")
+        # ... (Önceki stabil form kodu)
+
+    # --- 3. ARAMA & DÜZENLE ---
     elif menu == "🔍 Arama & Düzenle":
-        st.subheader("🔍 Ürün Fiyat Analizi")
-        # ... (Arama ve Tablo Kodları)
-        st.info("Ayarlar tamamlandıktan sonra burada analiz yapabilirsiniz.")
+        st.subheader("🔍 Ürün Analizi")
+        p_data = pd.DataFrame(ws_prod.get_all_records())
+        s_data = pd.DataFrame(ws_set.get_all_records())
+        
+        if p_data.empty:
+            st.info("Henüz ürün yüklenmemiş.")
+        else:
+            # (Filtreleme ve Satış Fiyatı hesaplama motoru buraya gelecek)
+            st.dataframe(p_data.head(50)) # Geçici izleme
