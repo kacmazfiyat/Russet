@@ -18,3 +18,9 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         kategori TEXT, malzeme_adi TEXT, birim_fiyat REAL, sheet_adi TEXT)''')
     conn.commit()
+    def delete_marketplace(mp_id):
+    conn = create_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM marketplaces WHERE id=?", (mp_id,))
+    conn.commit()
+    conn.close()

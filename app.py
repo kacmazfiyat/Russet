@@ -182,5 +182,31 @@ elif sayfa == "💡 Fiyat Önerici":
         st.table(pd.DataFrame(oneri_listesi))
     else:
         st.error("Veri eksik!")
+# --- PAZARYERİ AYARLARI SEKMESİ İÇİNDE ---
+st.subheader("Aktif Pazaryerleri")
+mps = get_all_marketplaces() # Veritabanından tüm pazaryerlerini çeken fonksiyonun
 
+if not mps.empty:
+    st.dataframe(mps, use_container_width=True)
+    
+    # Silme işlemi için seçim kutusu
+    st.divider()
+    col1, col2 = st.columns([3, 1])
+    
+    with col1:
+        selected_mp_name = st.selectbox(
+            "Silmek istediğiniz pazaryerini seçin:", 
+            options=mps['name'].tolist()
+        )
+    
+    with col2:
+        # Seçilen isme ait ID'yi bul
+        target_id = mps[mps['name'] == selected_mp_name]['id'].values[0]
+        st.write("") # Boşluk için
+        if st.button(f"🗑️ {selected_mp_name} Sil", type="secondary"):
+            delete_marketplace(target_id)
+            st.success(f"{selected_mp_name} başarıyla silindi!")
+            st.rerun()
+else:
+    st.info("Henüz eklenmiş bir pazaryeri yok.")
 conn.close()
