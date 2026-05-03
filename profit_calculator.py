@@ -7,10 +7,10 @@ def calculate_results(satis_fiyati, maliyet, mp):
 
     # KDV Hesaplama Mantığı
     if kdv_dahil == 1:
-        # Satış fiyatının içinden KDV ayıklanır (Brüt Fiyat)
+        # Satış fiyatının içinden KDV ayıklanır
         kdv_tutari = satis_fiyati - (satis_fiyati / (1 + kdv_orani))
     else:
-        # Satış fiyatının üzerine KDV eklenir (Net Fiyat + KDV)
+        # Satış fiyatının üzerine KDV eklenir
         kdv_tutari = satis_fiyati * kdv_orani
 
     # Giderlerin Hesaplanması
@@ -25,17 +25,16 @@ def calculate_results(satis_fiyati, maliyet, mp):
                     mp.get('hizmet', 0) + 
                     mp.get('ekstra', 0))
     
-    # Toplam Tahsilat (Müşterinin ödediği toplam para)
-    toplam_tahsilat = satis_fiyati if kdv_dahil == 1 else (satis_fiyati + kdv_tutari)
+    # Toplam Tahsilat (Bankaya yatan net para - Görselde gizli, hesapta var)
+    tahsilat = (satis_fiyati if kdv_dahil == 1 else (satis_fiyati + kdv_tutari)) - toplam_gider
     
-    net_kar = toplam_tahsilat - maliyet - toplam_gider
-    kar_marji = (net_kar / toplam_tahsilat * 100) if toplam_tahsilat > 0 else 0
+    net_kar = tahsilat - maliyet
+    kar_marji = (net_kar / (satis_fiyati if kdv_dahil == 1 else (satis_fiyati + kdv_tutari)) * 100) if satis_fiyati > 0 else 0
     
     return {
         "net_kar": round(net_kar, 2),
         "kar_marji": round(kar_marji, 2),
         "kdv_tutari": round(kdv_tutari, 2),
         "komisyon_tutari": round(komisyon_tutari, 2),
-        "toplam_gider": round(toplam_gider, 2),
-        "toplam_tahsilat": round(toplam_tahsilat, 2)
+        "toplam_gider": round(toplam_gider, 2)
     }
