@@ -1,8 +1,30 @@
-# --- PAZARYERİ AYARLARI MENÜSÜ ---
+import streamlit as st
+import pandas as pd
+from database import init_db, get_all_marketplaces, save_marketplace, delete_marketplace
+from excel_reader import process_excel
+
+# Sayfa Genişliği ve Başlık
+st.set_page_config(page_title="Pazaryeri Pro Yönetim", layout="wide")
+
+# Veritabanını Başlat (Sütun hatası alırsan pazaryeri.db dosyasını silmeyi unutma)
+init_db()
+
+# --- SIDEBAR NAVİGASYON ---
+with st.sidebar:
+    st.title("💎 Pro Yönetim")
+    # Menü isimlerinin sidebar'daki radio butonlarla tam eşleşmesi gerekir
+    menu = st.radio("Menü Seçiniz:", ["📊 Analiz", "⚙️ Pazaryeri Ayarları", "📂 Veri Yükleme"])
+
+# --- 1. ANALİZ / DASHBOARD ---
+if menu == "📊 Analiz":
+    st.header("Genel Kar-Zarar Analizi")
+    st.info("Veri yükledikten sonra analiz burada görünecektir.")
+
+# --- 2. PAZARYERİ AYARLARI (GÜNCELLENMİŞ) ---
 elif menu == "⚙️ Pazaryeri Ayarları":
     st.header("Pazaryeri Yapılandırması")
     
-    # 1. Yeni Ekleme Formu (Üst Kısım)
+    # Yeni Ekleme Formu
     with st.expander("➕ Yeni Pazaryeri Ekle", expanded=False):
         with st.form("yeni_mp_form"):
             name = st.text_input("Pazaryeri Adı (Örn: TRENDYOL)")
@@ -34,35 +56,43 @@ elif menu == "⚙️ Pazaryeri Ayarları":
 
     st.divider()
     
-    # 2. Mevcut Kayıtlar ve Silme Tuşu (Alt Kısım)
+    # Mevcut Kayıtlar ve Silme İşlemi
     st.subheader("Aktif Pazaryerleri")
     mps = get_all_marketplaces()
 
     if not mps.empty:
-        # Tabloyu göster
         st.dataframe(mps, use_container_width=True)
         
-        # SİLME ALANI (Burayı kontrol et, kodda olduğundan emin ol)
         st.write("---")
         st.write("### 🗑️ Kayıt Yönetimi")
         col_del1, col_del2 = st.columns([3, 1])
         
         with col_del1:
-            # Seçenekleri hazırla
             options = []
             for _, row in mps.iterrows():
-                kdv_tip = "Dahil" if row['kdv_dahil'] == 1 else "Hariç"
+                kdv_tip = "Dahil" if row.get('kdv_dahil') == 1 else "Hariç"
                 options.append(f"{row['id']} - {row['name']} (KDV {kdv_tip})")
             
-            secilen_kayit = st.selectbox("Silinecek pazaryerini seçin:", options, key="delete_box")
+            secilen_kayit = st.selectbox("Silinecek pazaryerini seçin:", options)
             target_id = int(secilen_kayit.split(" - ")[0])
             
         with col_del2:
-            st.write(" ") # Dikey hizalama
+            st.write(" ") 
             st.write(" ") 
             if st.button("Seçiliyi Sil", type="primary", use_container_width=True):
                 delete_marketplace(target_id)
-                st.toast(f"ID {target_id} silindi!")
                 st.rerun()
     else:
-        st.info("Henüz tanımlı bir pazaryeri bulunamadı. Lütfen yukarıdan ekleyin.")
+        st.info("Henüz pazaryeri tanımlanmamış.")
+
+# --- 3. VERİ YÜKLEME ---
+elif menu == "📂 Veri Yükleme":
+    st.header("Excel Veri Yönetimi")
+    file = st.file_uploader("Fiyat Listesi (.xlsx)", type="xlsx")
+    if file:
+        df = process_excel(file)
+        if not df.empty:
+            st.success(f"{len(df)} ürün yüklendi.")
+            st.dataframe(df)
+        else:
+            st.error("Excel okunamadı. Sütun başlıklarını kontrol edin.")
