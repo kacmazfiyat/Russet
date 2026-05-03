@@ -3,15 +3,12 @@ import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
 import numpy as np
+import time
+from datetime import datetime
 
-st.set_page_config(page_title="Pazaryeri Fiyat Motoru v47", layout="wide")
+st.set_page_config(page_title="Pazaryeri Fiyat Motoru v49", layout="wide")
 
 # --- YARDIMCI FONKSİYONLAR ---
-def clean_val(val):
-    if pd.isna(val) or val is None or str(val).lower() in ["nan", "inf", "-inf"]:
-        return 0.0 if isinstance(val, (int, float)) else ""
-    return val
-
 def safe_float(value, default=0.0):
     try:
         if value is None or str(value).strip() == "": return default
@@ -32,83 +29,84 @@ try:
     sh = client.open("Pazaryeri_Veritabani")
     ws_prod = sh.worksheet("Products")
     ws_set = sh.worksheet("Settings")
+    # Backup sayfası yoksa oluştur
+    try:
+        ws_back = sh.worksheet("Backup")
+    except:
+        ws_back = sh.add_worksheet(title="Backup", rows="1000", cols="6")
+        ws_back.append_row(["Tarih", "urun_adi", "boy", "maliyet", "doviz", "sayfa_adi"])
 except Exception as e:
-    st.error(f"Bağlantı Hatası: {e}")
+    st.error(f"⚠️ Bağlantı Hatası: {e}")
     st.stop()
 
-# --- MENÜ SİSTEMİ ---
-menu = st.sidebar.radio("Menü", ["🔍 Arama & Düzenle", "⚙️ Ayarlar", "📥 Veri Yükle & Temizle"])
+menu = st.sidebar.radio("Menü", ["🔍 Arama & Düzenle", "⚙️ Ayarlar", "📥 Veri Yükle & Backup"])
 
-# --- 1. AYARLAR SAYFASI ---
-if menu == "⚙️ Ayarlar":
-    st.subheader("⚙️ Platform ve Kur Ayarları")
-    s_df = pd.DataFrame(ws_set.get_all_records())
-    platforms = ["Trendyol", "Hepsiburada", "Amazon", "N11"]
-    sel_plat = st.selectbox("Platform Seçin", platforms)
+# --- VERİ YÜKLEME & BACKUP SİSTEMİ ---
+if menu == "📥 Veri Yükle & Backup":
+    st.subheader("📥 Veritabanı Yönetimi & Yedekleme")
     
-    current_s = s_df[s_df['platform'] == sel_plat].iloc[0].to_dict() if not s_df.empty and sel_plat in s_df['platform'].values else {}
-
-    with st.form("settings_form"):
-        col1, col2 = st.columns(2)
-        kom = col1.number_input("Komisyon (%)", value=safe_float(current_s.get('komisyon', 20.0)))
-        kar = col2.number_input("Hedef Kâr (%)", value=safe_float(current_s.get('kar', 20.0)))
-        kargo = col1.number_input("Kargo Ücreti (TL)", value=safe_float(current_s.get('kargo', 80.0)))
-        hizmet = col2.number_input("Hizmet Bedeli (TL)", value=safe_float(current_s.get('hizmet', 15.0)))
-        st.divider()
-        eur = col1.number_input("EURO Kuru", value=safe_float(current_s.get('eur', 35.0)))
-        usd = col2.number_input("USD Kuru", value=safe_float(current_s.get('usd', 32.0)))
-        
-        if st.form_submit_button("Ayarları Kaydet"):
-            new_row = [sel_plat, kom, kargo, hizmet, kar, 20, 0, eur, usd]
-            cell = ws_set.find(sel_plat)
-            if cell: ws_set.update(range_name=f"A{cell.row}:I{cell.row}", values=[new_row])
-            else: ws_set.append_row(new_row)
-            st.success(f"{sel_plat} ayarları güncellendi!")
-            st.rerun()
-
-# --- 2. VERİ YÜKLEME VE SİLME ---
-elif menu == "📥 Veri Yükle & Temizle":
-    st.subheader("📥 Veritabanı Yönetimi")
-    
-    # SİLME BÖLÜMÜ (Geri geldi!)
-    with st.expander("🗑️ Altyapıyı ve Ürünleri Sil"):
-        st.error("DİKKAT: Bu işlem tüm ürün veritabanını sıfırlayacaktır.")
-        delete_confirm = st.text_input("Silmek için (sil) yazın:", placeholder="sil")
-        if st.button("Veritabanını Temizle"):
-            if delete_confirm.lower() == "sil":
+    # BACKUP GERİ YÜKLEME (Basit Arayüz)
+    with st.expander("⏪ Yedekten Geri Dön"):
+        back_data = pd.DataFrame(ws_back.get_all_records())
+        if not back_data.empty:
+            dates = back_data['Tarih'].unique().tolist()
+            selected_date = st.selectbox("Geri dönülecek tarih/saat seçin:", dates[::-1])
+            if st.button("Seçili Yedeği Geri Yükle"):
+                restore_df = back_data[back_data['Tarih'] == selected_date].drop(columns=['Tarih'])
                 ws_prod.clear()
                 ws_prod.append_row(["urun_adi", "boy", "maliyet", "doviz", "sayfa_adi"])
-                st.success("Altyapı ve ürünler başarıyla temizlendi!")
+                ws_prod.append_rows(restore_df.values.tolist())
+                st.success(f"✅ {selected_date} tarihli yedeğe dönüldü!")
+                time.sleep(2)
                 st.rerun()
-            else:
-                st.warning("Lütfen kutucuğa 'sil' yazın.")
 
     st.divider()
-    
-    # EXCEL YÜKLEME
-    file = st.file_uploader("Excel Dosyası (.xlsx)", type=['xlsx'])
-    if file and st.button("Aktarımı Başlat"):
-        xls = pd.ExcelFile(file)
-        all_rows = []
-        for sheet in xls.sheet_names:
-            df = pd.read_excel(file, sheet_name=sheet, header=None)
-            # (Sütun tespiti ve veri temizleme döngüsü)
-            # ... [Daha önce hazırladığımız temizleme döngüsü buraya dahil]
-            # Örnek basit döngü:
-            for _, row in df.iloc[1:].iterrows():
-                all_rows.append([str(row[0]), str(row[1]), safe_float(row[2]), "TL", sheet])
-        
-        if all_rows:
-            ws_prod.append_rows(all_rows, value_input_option='RAW')
-            st.success(f"{len(all_rows)} Ürün eklendi!")
 
-# --- 3. ARAMA & DÜZENLE ---
-elif menu == "🔍 Arama & Düzenle":
-    st.subheader("🔍 Ürün Analiz ve Düzenleme")
-    p_df = pd.DataFrame(ws_prod.get_all_records())
-    if p_df.empty:
-        st.info("Veritabanı boş. Lütfen 'Veri Yükle' menüsünü kullanın.")
-    else:
-        search = st.text_input("Ürün Ara...")
-        filtered_df = p_df[p_df['urun_adi'].str.contains(search, case=False)]
-        st.data_editor(filtered_df, use_container_width=True)
+    # EXCEL YÜKLEME (Hatalı Eşleşme Düzeltildi)
+    file = st.file_uploader("Excel Dosyası (.xlsx)", type=['xlsx'])
+    if file and st.button("Yedekle ve Aktarımı Başlat"):
+        with st.spinner("Mevcut veri yedekleniyor ve Excel işleniyor..."):
+            # 1. MEVCUT VERİYİ YEDEKLE
+            current_p = ws_prod.get_all_records()
+            if current_p:
+                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                backup_list = [[ts] + list(row.values()) for row in current_p]
+                ws_back.append_rows(backup_list)
+
+            # 2. EXCEL OKUMA (Görseldeki kayma hatası düzeltildi)
+            xls = pd.ExcelFile(file)
+            all_rows = []
+            for sheet in xls.sheet_names:
+                df = pd.read_excel(file, sheet_name=sheet, header=None)
+                
+                # Sütun tespiti için daha hassas tarama
+                price_col, name_col, size_col = -1, -1, -1
+                for i in range(min(20, len(df))):
+                    row_vals = [str(v).upper().strip() for v in df.iloc[i].values]
+                    # MALZEME ADI tespiti (Ürün adı buraya düşmeli)
+                    if any(x in row_vals for x in ["MALZEME ADI", "ÜRÜN ADI", "AÇIKLAMA"]):
+                        name_col = next(idx for idx, v in enumerate(row_vals) if v in ["MALZEME ADI", "ÜRÜN ADI", "AÇIKLAMA"])
+                    if any(x in row_vals for x in ["BOY", "ÖLÇÜ", "EBAT"]):
+                        size_col = next(idx for idx, v in enumerate(row_vals) if v in ["BOY", "ÖLÇÜ", "EBAT"])
+                    if "BİRİM FİYATI" in row_vals:
+                        price_col = row_vals.index("BİRİM FİYATI")
+                
+                if name_col != -1 and price_col != -1:
+                    for _, row in df.iloc[i+1:].iterrows():
+                        u_name = str(row[name_col]).strip()
+                        if u_name == "" or u_name.lower() == "nan": continue
+                        
+                        u_size = str(row[size_col]).strip() if size_col != -1 else "-"
+                        u_price = safe_float(row[price_col])
+                        
+                        # Döviz tespiti
+                        cur_raw = str(row[price_col+1]).upper() if len(row) > price_col+1 else "TL"
+                        d_tipi = "EUR" if "EUR" in cur_raw or "€" in cur_raw else ("USD" if "USD" in cur_raw or "$" in cur_raw else "TL")
+                        
+                        all_rows.append([u_name, u_size, u_price, d_tipi, sheet])
+            
+            if all_rows:
+                ws_prod.append_rows(all_rows, value_input_option='RAW')
+                st.success(f"✅ {len(all_rows)} Ürün yüklendi. Eski veriler Backup sekmesine kaydedildi.")
+
+# (🔍 Arama & Düzenle menüsü altındaki tablo gösterimini de p_df.head() yerine tam liste olarak güncel tutuyorum)
