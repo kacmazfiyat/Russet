@@ -1,10 +1,13 @@
 def calculate_net_profit(satis_fiyati, maliyet, mp_settings):
-    # Komisyon, KDV ve Stopaj oran bazlı hesaplanır
+    """
+    Pazaryeri giderlerini hesaplar ve net kâr/marj sonucunu döner.
+    """
+    # Oran bazlı giderler
     komisyon_tutari = satis_fiyati * (mp_settings['komisyon'] / 100)
     kdv_tutari = satis_fiyati * (mp_settings['kdv'] / 100)
     stopaj_tutari = satis_fiyati * (mp_settings['stopaj'] / 100)
     
-    # Sabit giderler ve oranlı giderlerin toplamı
+    # Tüm giderlerin toplamı
     toplam_gider = (komisyon_tutari + mp_settings['kargo'] + 
                     mp_settings['kupon'] + stopaj_tutari + 
                     kdv_tutari + mp_settings['hizmet'] + 
@@ -26,4 +29,18 @@ def calculate_net_profit(satis_fiyati, maliyet, mp_settings):
         }
     }
 
-# Mevcut suggest_price fonksiyonun bunun altında kalmaya devam etsin...
+def suggest_price(maliyet, hedef_kar_marji, mp_settings):
+    """
+    Hedef kâr marjına ulaşmak için gereken satış fiyatını hesaplar.
+    """
+    oranlar_toplami = (mp_settings['komisyon'] + mp_settings['kdv'] + 
+                       mp_settings['stopaj'] + hedef_kar_marji) / 100
+    
+    sabit_giderler = mp_settings['kargo'] + mp_settings['kupon'] + \
+                     mp_settings['hizmet'] + mp_settings['ekstra']
+    
+    if oranlar_toplami >= 1:
+        return 0
+        
+    onerilen_fiyat = (maliyet + sabit_giderler) / (1 - oranlar_toplami)
+    return round(onerilen_fiyat, 2)
