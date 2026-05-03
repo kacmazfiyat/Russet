@@ -1,20 +1,20 @@
-import os
-import re
-import sqlite3
+import streamlit as st
 import pandas as pd
-from flask import Flask, render_template, request, flash, redirect, url_for
+import sqlite3
+import re
+import os
 
-app = Flask(__name__)
-app.secret_key = "pazaryeri_pro_key_123"
+# --- SAYFA AYARLARI ---
+st.set_page_config(page_title="Pro Yönetim", layout="wide")
 
-# --- VERİTABANI AYARLARI ---
-DB_NAME = 'pazaryeri.db'
+# --- VERİTABANI FONKSİYONLARI ---
+def get_db_connection():
+    conn = sqlite3.connect('pazaryeri.db', check_same_thread=False)
+    return conn
 
 def init_db():
-    """Veritabanı ve tabloyu oluşturur."""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute('''
+    conn = get_db_connection()
+    conn.execute('''
         CREATE TABLE IF NOT EXISTS products (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             barkod TEXT,
@@ -26,123 +26,101 @@ def init_db():
     conn.commit()
     conn.close()
 
-# Uygulama başlarken veritabanını hazırla
 init_db()
 
 # --- EXCEL İŞLEME MOTORU ---
-def process_excel_logic(file):
+def process_excel(uploaded_file):
     try:
-        xls = pd.ExcelFile(file)
-        all_products = []
+        xls = pd.ExcelFile(uploaded_file)
+        all_data = []
         
         for sheet_name in xls.sheet_names:
-            # Excel'in ilk 10 satırını oku (başlığı bulmak için)
-            df_header_check = pd.read_excel(file, sheet_name=sheet_name, header=None).head(10)
+            # Sizin Excel'de başlıklar 4. satırda (Pandas index: 3)
+            df = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=3)
             
-            header_idx = None
-            # "MALZEME ADI" yazan satırı dinamik bul
-            for i, row in df_header_check.iterrows():
-                row_vals = [str(val).strip().upper() for val in row.values if pd.notna(val)]
-                if "MALZEME ADI" in row_vals:
-                    header_idx = i
-                    break
-            
-            if header_idx is None:
-                continue # Başlık bulunamadıysa bu sayfayı atla
-
-            # Sayfayı bulduğumuz satırdan itibaren oku
-            df = pd.read_excel(file, sheet_name=sheet_name, header=header_idx)
-            
-            # Sütun isimlerini temizle
+            # Sütun isimlerini temizle (Büyük harf ve boşluk silme)
             df.columns = [str(c).strip().upper() for c in df.columns]
 
-            # Sizin Excel yapınızdaki sütunları eşleştir
+            # Sizin Excel sütunlarını eşleştiriyoruz
             # 'MALZEME ADI' -> urun_adi, 'BİRİM FİYATI' -> maliyet, 'CM.' -> boyut
-            col_map = {
-                'MALZEME ADI': 'urun_adi',
-                'BİRİM FİYATI': 'maliyet',
-                'CM.': 'boyut'
-            }
-            df = df.rename(columns=col_map)
+            mapping = {'MALZEME ADI': 'urun_adi', 'BİRİM FİYATI': 'maliyet', 'CM.': 'boyut'}
+            df = df.rename(columns=mapping)
 
-            # Sadece ihtiyacımız olan sütunları al (Eğer varsa)
-            needed_cols = [c for c in ['urun_adi', 'maliyet', 'boyut'] if c in df.columns]
-            df = df[needed_cols]
+            # Sadece ihtiyacımız olanları al
+            needed = [c for c in ['urun_adi', 'maliyet', 'boyut'] if c in df.columns]
+            df = df[needed]
 
-            # Boş satırları at
+            # Boş olanları temizle
             df = df.dropna(subset=['urun_adi', 'maliyet'])
-            
-            # Sayı temizleme fonksiyonu
-            def clean_price(price):
+
+            # Fiyat temizleme (TL, virgül, nokta düzeltme)
+            def clean_price(val):
                 try:
-                    if pd.isna(price): return 0.0
-                    p_str = str(price).replace('.', '').replace(',', '.')
-                    res = re.findall(r"[-+]?\d*\.\d+|\d+", p_str)
+                    s = str(val).replace('.', '').replace(',', '.')
+                    res = re.findall(r"[-+]?\d*\.\d+|\d+", s)
                     return float(res[0]) if res else 0.0
-                except:
-                    return 0.0
+                except: return 0.0
 
             df['maliyet'] = df['maliyet'].apply(clean_price)
-            df = df[df['maliyet'] > 0] # 0 olanları ele
+            df = df[df['maliyet'] > 0]
 
-            # Boyut bilgisini isme ekle
+            # İsim ve boyutu birleştir
             if 'boyut' in df.columns:
                 df['urun_adi'] = df['urun_adi'].astype(str) + " (" + df['boyut'].astype(str) + " CM)"
 
-            all_products.append(df)
+            all_data.append(df)
 
-        if not all_products:
-            return None
+        if not all_data: return None
 
-        final_df = pd.concat(all_products, ignore_index=True)
-        final_df['dosya_adi'] = getattr(file, 'filename', 'Excel_Dosyasi')
+        final_df = pd.concat(all_data, ignore_index=True)
+        final_df['dosya_adi'] = uploaded_file.name
         final_df['barkod'] = [f"BRK-{1000 + i}" for i in range(len(final_df))]
         
-        # Veritabanına Yazma
-        conn = sqlite3.connect(DB_NAME)
+        # Veritabanına kaydet
+        conn = get_db_connection()
         final_df[['barkod', 'urun_adi', 'maliyet', 'dosya_adi']].to_sql('products', conn, if_exists='append', index=False)
         conn.close()
         
         return len(final_df)
-
     except Exception as e:
-        print(f"Hata detayı: {e}")
+        st.error(f"Hata oluştu: {e}")
         return None
 
-# --- ROUTE'LAR (SAYFALAR) ---
+# --- ARAYÜZ (STREAMLIT) ---
+st.title("💎 Pro Yönetim - Veri Sistemi")
 
-@app.route('/')
-def index():
-    return render_template('index.html') # Veya ana sayfanız hangisiyse
+menu = st.sidebar.radio("Menü Seçiniz:", ["Analiz", "Veri Yükleme"])
 
-@app.route('/upload', methods=['POST'])
-def upload_file():
-    if 'file' not in request.files:
-        flash("Dosya seçilmedi", "danger")
-        return redirect(request.referrer)
+if menu == "Veri Yükleme":
+    st.subheader("📁 Veri Yönetimi")
+    uploaded_file = st.file_uploader("Excel Dosyası Seçin", type=['xlsx'])
     
-    file = request.files['file']
-    if file.filename == '':
-        flash("Dosya adı boş", "danger")
-        return redirect(request.referrer)
+    if st.button("Excel Yükle"):
+        if uploaded_file:
+            with st.spinner("Dosya işleniyor..."):
+                count = process_excel(uploaded_file)
+                if count:
+                    st.success(f"Başarılı! {count} ürün sisteme eklendi.")
+                else:
+                    st.error("Dosya işlenemedi. Sütun isimlerini kontrol edin.")
+        else:
+            st.warning("Lütfen bir dosya seçin.")
 
-    count = process_excel_logic(file)
-    
-    if count:
-        flash(f"Başarılı! {count} adet ürün veritabanına eklendi.", "success")
-    else:
-        flash("Dosya işlenemedi. Sütun isimlerini veya formatı kontrol edin.", "danger")
-        
-    return redirect(request.referrer)
+    if st.button("Hafızayı Temizle (Veritabanını Sıfırla)"):
+        conn = get_db_connection()
+        conn.execute("DELETE FROM products")
+        conn.commit()
+        conn.close()
+        st.info("Tüm veriler temizlendi.")
 
-@app.route('/products')
-def list_products():
-    conn = sqlite3.connect(DB_NAME)
-    # Veritabanından çekerek sayfayı yenileseniz de gitmemesini sağlıyoruz
-    df = pd.read_sql_query("SELECT * FROM products", conn)
+elif menu == "Analiz":
+    st.subheader("📊 Ürün Analizi")
+    conn = get_db_connection()
+    df_list = pd.read_sql_query("SELECT * FROM products", conn)
     conn.close()
-    products = df.to_dict(orient='records')
-    return render_template('analiz.html', products=products)
 
-if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    if not df_list.empty:
+        st.dataframe(df_list, use_container_width=True)
+        st.write(f"Toplam kayıtlı ürün sayısı: {len(df_list)}")
+    else:
+        st.info("Henüz veri yüklenmemiş.")
