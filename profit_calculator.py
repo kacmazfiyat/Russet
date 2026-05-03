@@ -2,16 +2,15 @@ def calculate_results(satis_fiyati, maliyet, mp):
     """
     Pazaryeri ayarlarına göre net kar, KDV ve gider kalemlerini hesaplar.
     """
-    # Veritabanı sütun isimlerine göre güvenli veri çekme
     kdv_orani = mp.get('kdv', 20) / 100
     kdv_dahil = mp.get('kdv_dahil', 1)  # 1: Dahil, 0: Hariç
 
     # KDV Hesaplama Mantığı
     if kdv_dahil == 1:
-        # Satış fiyatının içinden KDV ayıklanır (Brüt Fiyat üzerinden)
+        # Satış fiyatının içinden KDV ayıklanır (Brüt Fiyat)
         kdv_tutari = satis_fiyati - (satis_fiyati / (1 + kdv_orani))
     else:
-        # Satış fiyatının üzerine KDV eklenir (Fiyat + KDV)
+        # Satış fiyatının üzerine KDV eklenir (Net Fiyat + KDV)
         kdv_tutari = satis_fiyati * kdv_orani
 
     # Giderlerin Hesaplanması
