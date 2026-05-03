@@ -10,10 +10,10 @@ def process_excel(file):
     
     for sheet_name in xl.sheet_names:
         try:
-            # Sayfayı ham veri olarak oku (başlık tanımlamadan)
+            # Sayfayı ham veri olarak oku
             df_raw = pd.read_excel(file, sheet_name=sheet_name, header=None)
             
-            # Tablo içinde 'MALZEME ADI' ve 'BİRİM FİYATI' kelimelerinin nerede olduğunu bul
+            # Başlık satırını dinamik olarak bul (Her sayfada farklı satırda olsa bile bulur)
             header_row_index = None
             for i, row in df_raw.iterrows():
                 row_str = [str(val).upper() for val in row.values]
@@ -22,7 +22,7 @@ def process_excel(file):
                     break
             
             if header_row_index is not None:
-                # Başlık satırını bulduk, veriyi oradan itibaren tekrar işle
+                # Veriyi bulduğumuz başlık satırından itibaren tekrar oku
                 df = pd.read_excel(file, sheet_name=sheet_name, skiprows=header_row_index)
                 df.columns = [str(c).strip().upper() for c in df.columns]
                 
@@ -32,10 +32,12 @@ def process_excel(file):
                 if col_malzeme and col_fiyat:
                     valid_data = df[[col_malzeme, col_fiyat]].copy()
                     valid_data.columns = ['malzeme_adi', 'birim_fiyat']
+                    
+                    # Fiyatı sayıya çevir, hatalıları temizle
                     valid_data['birim_fiyat'] = pd.to_numeric(valid_data['birim_fiyat'], errors='coerce')
                     valid_data = valid_data.dropna(subset=['birim_fiyat', 'malzeme_adi'])
                     
-                    # Sayfa adını kategori yap
+                    # Sayfa adını kategori olarak ata
                     valid_data['kategori'] = sheet_name.strip()
                     all_data.append(valid_data)
         except:
