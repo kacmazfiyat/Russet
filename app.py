@@ -6,7 +6,7 @@ import re
 import requests
 import xml.etree.ElementTree as ET
 
-st.set_page_config(page_title="Pazaryeri Fiyat Motoru v28", layout="wide")
+st.set_page_config(page_title="Pazaryeri Fiyat Motoru v29", layout="wide")
 
 # --- TCMB KUR ÇEKME ---
 def get_tcmb_kurlar():
@@ -88,7 +88,7 @@ if check_password():
                     else: ws_set.append_row(new_row)
                     st.success("Kaydedildi!")
 
-    # --- VERİ YÜKLEME (GÜNCELLENMİŞ CM. TESPİTİ) ---
+    # --- VERİ YÜKLEME (FİLTRELEMELİ) ---
     elif menu == "📥 Veri Yükle":
         st.subheader("📥 Excel'den Buluta Aktar")
         file = st.file_uploader("Excel Dosyası", type=['xlsx'])
@@ -96,43 +96,48 @@ if check_password():
             with st.spinner("İşleniyor..."):
                 xls = pd.ExcelFile(file)
                 all_rows = []
+                # Filtrelenecek başlık kelimeleri
+                excluded_names = ["MALZEME ADI", "ÜRÜN ADI", "MALZEME", "ADI", "CM."]
+                
                 for sheet_name in xls.sheet_names:
                     df = pd.read_excel(file, sheet_name=sheet_name, header=None).fillna("")
                     price_col, name_col, size_col = -1, -1, -1
                     
-                    # Başlık Satırını ve Sütunları Tespit Et
                     for i in range(min(20, len(df))):
                         row_vals = [str(val).upper().strip() for val in df.iloc[i].values]
                         if "BİRİM FİYATI" in row_vals: price_col = row_vals.index("BİRİM FİYATI")
                         if any(x in row_vals for x in ["MALZEME ADI", "ÜRÜN ADI"]):
                             name_col = next(idx for idx, v in enumerate(row_vals) if v in ["MALZEME ADI", "ÜRÜN ADI"])
-                        # KRİTİK DÜZELTME: "CM." başlığını arıyoruz
                         if any(x in row_vals for x in ["CM.", "CM", "BOY", "ÖLÇÜ"]):
                             size_col = next(idx for idx, v in enumerate(row_vals) if v in ["CM.", "CM", "BOY", "ÖLÇÜ"])
                     
                     if price_col != -1 and name_col != -1:
                         for _, row in df.iloc[i+1:].iterrows():
                             raw_name = str(row[name_col]).strip()
-                            if not raw_name or raw_name.upper() in ["NAN", ""]: continue
                             
-                            # BOY BULMA STRATEJİSİ
+                            # --- BAŞLIK FİLTRESİ ---
+                            # İsim boşsa veya sadece başlıklardan oluşuyorsa atla
+                            if not raw_name or raw_name.upper() in excluded_names or raw_name.upper() in ["NAN", ""]:
+                                continue
+
                             extracted_boy = "-"
-                            
-                            # 1. Strateji: Başlıkta "CM." bulunan sütunda veri var mı?
                             if size_col != -1 and str(row[size_col]).strip() != "":
                                 val = str(row[size_col]).strip()
-                                extracted_boy = val if "CM" in val.upper() else f"{val} CM"
+                                # Eğer değer "CM." başlığının kendisiyse atla
+                                if val.upper() == "CM.": 
+                                    extracted_boy = "-"
+                                else:
+                                    extracted_boy = val if "CM" in val.upper() else f"{val} CM"
                             
-                            # 2. Strateji: İsim içinde '15 CM' yazıyor mu?
-                            elif re.search(r'(\d+)\s*CM', raw_name, flags=re.I):
-                                match = re.search(r'(\d+)\s*CM', raw_name, flags=re.I)
-                                extracted_boy = match.group(0).upper()
-                                raw_name = raw_name.replace(match.group(0), "").strip()
-
                             try:
                                 f_raw = row[price_col]
                                 f_clean = float(str(f_raw).replace('.', '').replace(',', '.')) if isinstance(f_raw, str) else float(f_raw)
                             except: f_clean = 0.0
+                            
+                            # Eğer fiyat 0 ise bu muhtemelen bir ürün değil, başlıktır. Atla.
+                            if f_clean <= 0:
+                                continue
+
                             d_raw = str(row[price_col + 1]).strip().upper() if len(row) > price_col + 1 else "TL"
                             d_tipi = "EUR" if "EUR" in d_raw or "€" in d_raw else ("USD" if "USD" in d_raw or "$" in d_raw else "TL")
                             
@@ -140,14 +145,15 @@ if check_password():
                 
                 if all_rows:
                     get_worksheet("Products").append_rows(all_rows, value_input_option='RAW')
-                    st.success(f"✅ {len(all_rows)} ürün eklendi!")
+                    st.success(f"✅ {len(all_rows)} gerçek ürün eklendi (Başlıklar temizlendi)!")
 
     # --- ARAMA ---
     elif menu == "🔍 Arama & Düzenle":
         st.subheader("🔍 Ürün Analizi")
         ws_set, ws_prod = get_worksheet("Settings"), get_worksheet("Products")
         if ws_set and ws_prod:
-            s_data, p_data = pd.DataFrame(ws_set.get_all_records()), pd.DataFrame(ws_prod.get_all_records())
+            s_data, p_data = pd.DataFrame(ws_set.get_all_records())
+            p_data = pd.DataFrame(ws_prod.get_all_records())
             if not s_data.empty and not p_data.empty:
                 p_list = list(s_data['platform'].unique())
                 target = st.selectbox("", p_list, index=(p_list.index("Trendyol") if "Trendyol" in p_list else 0))
