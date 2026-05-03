@@ -1,59 +1,46 @@
 import pandas as pd
 
 def process_excel(file):
-    """
-    Excel dosyasındaki tüm sayfaları tarar, sayfa isimlerini kategori olarak alır
-     ve 3. satırdaki (skiprows=2) başlıkları kullanarak verileri ayıklar.
-    """
     try:
         xl = pd.ExcelFile(file)
     except Exception as e:
-        print(f"Excel dosyası açılırken hata oluştu: {e}")
         return pd.DataFrame()
 
     all_data = []
     
     for sheet_name in xl.sheet_names:
-        # Sayfa ismini kategori adı olarak belirle
-        kategori = sheet_name.strip()
-        
         try:
-            # Dosya yapısına göre ilk 2 satırı atlıyoruz (skiprows=2), 
-            # böylece 3. satırdaki 'MALZEME ADI' ve 'BİRİM FİYATI' başlıkları okunur.
-            df = pd.read_excel(file, sheet_name=sheet_name, skiprows=2)
+            # Sayfayı ham veri olarak oku (başlık tanımlamadan)
+            df_raw = pd.read_excel(file, sheet_name=sheet_name, header=None)
             
-            # Sütun isimlerindeki boşlukları temizle ve büyük harfe çevir (Eşleşme kolaylığı için)
-            df.columns = [str(c).strip().upper() for c in df.columns]
+            # Tablo içinde 'MALZEME ADI' ve 'BİRİM FİYATI' kelimelerinin nerede olduğunu bul
+            header_row_index = None
+            for i, row in df_raw.iterrows():
+                row_str = [str(val).upper() for val in row.values]
+                if any('MALZEME ADI' in s for s in row_str) and any('BİRİM FİYATI' in s for s in row_str):
+                    header_row_index = i
+                    break
             
-            # Dosyandaki tam sütun isimlerini hedef alıyoruz
-            col_malzeme = next((c for c in df.columns if 'MALZEME ADI' in c), None)
-            col_fiyat = next((c for c in df.columns if 'BİRİM FİYATI' in c), None)
-            
-            if col_malzeme and col_fiyat:
-                # Sadece ilgili sütunları seç ve kopyala
-                valid_data = df[[col_malzeme, col_fiyat]].copy()
-                valid_data.columns = ['malzeme_adi', 'birim_fiyat']
+            if header_row_index is not None:
+                # Başlık satırını bulduk, veriyi oradan itibaren tekrar işle
+                df = pd.read_excel(file, sheet_name=sheet_name, skiprows=header_row_index)
+                df.columns = [str(c).strip().upper() for c in df.columns]
                 
-                # 'BİRİM FİYATI' sütununu sayısal değere çevir, sayı olmayanları (TL yazısı vb.) NaN yap
-                valid_data['birim_fiyat'] = pd.to_numeric(valid_data['birim_fiyat'], errors='coerce')
+                col_malzeme = next((c for c in df.columns if 'MALZEME ADI' in c), None)
+                col_fiyat = next((c for c in df.columns if 'BİRİM FİYATI' in c), None)
                 
-                # Hem fiyatı hem de adı boş olmayan satırları filtrele
-                valid_data = valid_data.dropna(subset=['birim_fiyat', 'malzeme_adi'])
-                
-                # Veriye kategori ve sayfa bilgisini ekle
-                valid_data['kategori'] = kategori
-                valid_data['sheet_adi'] = sheet_name
-                
-                all_data.append(valid_data)
-        except Exception as e:
-            print(f"{sheet_name} sayfası işlenirken hata oluştu: {e}")
+                if col_malzeme and col_fiyat:
+                    valid_data = df[[col_malzeme, col_fiyat]].copy()
+                    valid_data.columns = ['malzeme_adi', 'birim_fiyat']
+                    valid_data['birim_fiyat'] = pd.to_numeric(valid_data['birim_fiyat'], errors='coerce')
+                    valid_data = valid_data.dropna(subset=['birim_fiyat', 'malzeme_adi'])
+                    
+                    # Sayfa adını kategori yap
+                    valid_data['kategori'] = sheet_name.strip()
+                    all_data.append(valid_data)
+        except:
             continue
             
-    # Tüm sayfalardan toplanan verileri birleştir
     if all_data:
-        final_df = pd.concat(all_data, ignore_index=True)
-        # Malzeme adlarındaki gereksiz boşlukları temizle
-        final_df['malzeme_adi'] = final_df['malzeme_adi'].astype(str).str.strip()
-        return final_df
-    
+        return pd.concat(all_data, ignore_index=True)
     return pd.DataFrame()
