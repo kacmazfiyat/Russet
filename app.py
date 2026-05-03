@@ -6,7 +6,7 @@ import re
 import requests
 import xml.etree.ElementTree as ET
 
-st.set_page_config(page_title="Pazaryeri Fiyat Motoru v29", layout="wide")
+st.set_page_config(page_title="Pazaryeri Fiyat Motoru v30", layout="wide")
 
 # --- TCMB KUR ÇEKME ---
 def get_tcmb_kurlar():
@@ -88,7 +88,7 @@ if check_password():
                     else: ws_set.append_row(new_row)
                     st.success("Kaydedildi!")
 
-    # --- VERİ YÜKLEME (FİLTRELEMELİ) ---
+    # --- VERİ YÜKLEME ---
     elif menu == "📥 Veri Yükle":
         st.subheader("📥 Excel'den Buluta Aktar")
         file = st.file_uploader("Excel Dosyası", type=['xlsx'])
@@ -96,13 +96,9 @@ if check_password():
             with st.spinner("İşleniyor..."):
                 xls = pd.ExcelFile(file)
                 all_rows = []
-                # Filtrelenecek başlık kelimeleri
-                excluded_names = ["MALZEME ADI", "ÜRÜN ADI", "MALZEME", "ADI", "CM."]
-                
                 for sheet_name in xls.sheet_names:
                     df = pd.read_excel(file, sheet_name=sheet_name, header=None).fillna("")
                     price_col, name_col, size_col = -1, -1, -1
-                    
                     for i in range(min(20, len(df))):
                         row_vals = [str(val).upper().strip() for val in df.iloc[i].values]
                         if "BİRİM FİYATI" in row_vals: price_col = row_vals.index("BİRİM FİYATI")
@@ -114,57 +110,56 @@ if check_password():
                     if price_col != -1 and name_col != -1:
                         for _, row in df.iloc[i+1:].iterrows():
                             raw_name = str(row[name_col]).strip()
+                            if not raw_name: continue
                             
-                            # --- BAŞLIK FİLTRESİ ---
-                            # İsim boşsa veya sadece başlıklardan oluşuyorsa atla
-                            if not raw_name or raw_name.upper() in excluded_names or raw_name.upper() in ["NAN", ""]:
-                                continue
-
                             extracted_boy = "-"
                             if size_col != -1 and str(row[size_col]).strip() != "":
                                 val = str(row[size_col]).strip()
-                                # Eğer değer "CM." başlığının kendisiyse atla
-                                if val.upper() == "CM.": 
-                                    extracted_boy = "-"
-                                else:
-                                    extracted_boy = val if "CM" in val.upper() else f"{val} CM"
+                                extracted_boy = val if "CM" in val.upper() else f"{val} CM"
                             
                             try:
                                 f_raw = row[price_col]
                                 f_clean = float(str(f_raw).replace('.', '').replace(',', '.')) if isinstance(f_raw, str) else float(f_raw)
                             except: f_clean = 0.0
                             
-                            # Eğer fiyat 0 ise bu muhtemelen bir ürün değil, başlıktır. Atla.
-                            if f_clean <= 0:
-                                continue
-
                             d_raw = str(row[price_col + 1]).strip().upper() if len(row) > price_col + 1 else "TL"
                             d_tipi = "EUR" if "EUR" in d_raw or "€" in d_raw else ("USD" if "USD" in d_raw or "$" in d_raw else "TL")
                             
-                            all_rows.append([raw_name, extracted_boy, f_clean, d_tipi, sheet_name])
+                            # iskonto başlangıçta 0 olarak atanır
+                            all_rows.append([raw_name, extracted_boy, f_clean, d_tipi, sheet_name, 0.0])
                 
                 if all_rows:
                     get_worksheet("Products").append_rows(all_rows, value_input_option='RAW')
-                    st.success(f"✅ {len(all_rows)} gerçek ürün eklendi (Başlıklar temizlendi)!")
+                    st.success(f"✅ {len(all_rows)} ürün eklendi!")
 
-    # --- ARAMA ---
+    # --- ARAMA & DÜZENLE (İSKONTO DAHİL) ---
     elif menu == "🔍 Arama & Düzenle":
-        st.subheader("🔍 Ürün Analizi")
+        st.subheader("🔍 Ürün Analizi & İskonto Tanımlama")
         ws_set, ws_prod = get_worksheet("Settings"), get_worksheet("Products")
         if ws_set and ws_prod:
-            s_data, p_data = pd.DataFrame(ws_set.get_all_records())
-            p_data = pd.DataFrame(ws_prod.get_all_records())
+            s_data = pd.DataFrame(ws_set.get_all_records())
+            p_raw = ws_prod.get_all_records()
+            p_data = pd.DataFrame(p_raw)
+            
             if not s_data.empty and not p_data.empty:
                 p_list = list(s_data['platform'].unique())
                 target = st.selectbox("", p_list, index=(p_list.index("Trendyol") if "Trendyol" in p_list else 0))
                 search = st.text_input("Arama yapın...", placeholder="Ürün adı veya boy...")
                 s = s_data[s_data['platform'] == target].iloc[0]
-                df = p_data[p_data['urun_adi'].str.contains(search, case=False) | p_data['boy'].astype(str).str.contains(search, case=False)]
                 
+                df = p_data[p_data['urun_adi'].str.contains(search, case=False) | p_data['boy'].astype(str).str.contains(search, case=False)].copy()
+                
+                # İSKONTOLU FİYAT HESAPLAMA
                 def calc_price(row):
+                    # Önce liste fiyatını kurla çarp
                     m = float(row['maliyet'])
                     if row['doviz'] == "EUR": m *= float(s['eur'])
                     elif row['doviz'] == "USD": m *= float(s['usd'])
+                    
+                    # ÜRÜN BAZLI İSKONTOYU UYGULA
+                    iskonto_orani = float(row.get('iskonto', 0))
+                    m = m * (1 - (iskonto_orani / 100))
+                    
                     m_net = m / (1 + (s['kdv']/100)) if s['kdv_dahil'] == 1 else m
                     gider = m_net + (float(s['kargo'])/1.2) + (float(s['hizmet'])/1.2)
                     payda = 1 - ((float(s['komisyon']) + float(s['kar']))/100)
@@ -172,7 +167,20 @@ if check_password():
 
                 if not df.empty:
                     df['Satış Fiyatı'] = df.apply(calc_price, axis=1)
-                    st.data_editor(df, use_container_width=True, hide_index=True)
+                    
+                    st.info("Aşağıdaki tablodan 'iskonto' sütununu değiştirip Enter'a basarak kaydedebilirsiniz.")
+                    edited_df = st.data_editor(df, use_container_width=True, hide_index=True, 
+                                               column_config={"iskonto": st.column_config.NumberColumn("İskonto (%)", min_value=0, max_value=100, step=0.1)})
+                    
+                    if st.button("İskontoları Veritabanına Kaydet"):
+                        # Sadece iskonto sütununu Sheets'e geri yazmak için tüm veriyi güncelliyoruz
+                        # Not: Bu işlem büyük veritabanlarında yavaş olabilir, ancak kesin çözümdür.
+                        p_data.update(edited_df)
+                        # Veriyi listeye çevirip başlıklarla birlikte gönderiyoruz
+                        updated_values = [p_data.columns.tolist()] + p_data.values.tolist()
+                        ws_prod.update(range_name='A1', values=updated_values)
+                        st.success("İskontolar başarıyla güncellendi ve fiyatlar yeniden hesaplandı!")
+                        st.rerun()
 
     # --- TEMİZLE ---
     elif menu == "🗑️ Veritabanı Yönetimi":
@@ -180,5 +188,5 @@ if check_password():
         if st.checkbox("Onaylıyorum") and st.button("Tümünü Sil"):
             ws_prod = get_worksheet("Products")
             if ws_prod:
-                ws_prod.batch_clear(["A2:E10000"])
+                ws_prod.batch_clear(["A2:F10000"]) # F sütununa kadar temizler (iskonto dahil)
                 st.success("Temizlendi!")
