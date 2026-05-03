@@ -4,85 +4,161 @@ from database import init_db, get_all_marketplaces, save_marketplace, delete_mar
 from excel_reader import process_excel
 from profit_calculator import calculate_results
 
-# Sayfa Ayarları
-st.set_page_config(page_title="Pro Yönetim", layout="wide")
+# Sayfa Yapılandırması
+st.set_page_config(page_title="Pro Yönetim", layout="wide", page_icon="💎")
+
+# Veritabanını Başlat (Eksik sütunları otomatik ekler)
 init_db()
 
-# --- SIDEBAR ---
+# --- SIDEBAR NAVİGASYON ---
 with st.sidebar:
     st.title("💎 Pro Yönetim")
     menu = st.radio("Menü Seçiniz:", ["📊 Analiz", "⚙️ Pazaryeri Ayarları", "📂 Veri Yükleme"])
 
-# --- 1. ANALİZ SEKİMESİ (Syntax hatası burada giderildi) ---
+# --- 1. ANALİZ / DASHBOARD SEKİMESİ ---
 if menu == "📊 Analiz":
     st.header("📊 Genel Kar-Zarar Analizi")
+    
     mps = get_all_marketplaces()
     
-    if not mps.empty:
-        col_a, col_b = st.columns(2)
-        with col_a:
-            sel_mp = st.selectbox("Pazaryeri Seçin:", mps['name'].unique())
-            mp_set = mps[mps['name'] == sel_mp].iloc[0].to_dict()
-        with col_b:
-            maliyet = st.number_input("Maliyet (TL):", value=100.0)
+    # Ürünleri Veritabanından Çek (Arama için)
+    try:
+        from database import create_connection
+        conn = create_connection()
+        # Excel yükleme modülünde tablo adının 'products' olduğunu varsayıyoruz
+        products_df = pd.read_sql_query("SELECT * FROM products", conn)
+        conn.close()
+    except:
+        products_df = pd.DataFrame()
+
+    if mps.empty:
+        st.warning("⚠️ Lütfen önce 'Pazaryeri Ayarları' menüsünden bir pazaryeri tanımlayın.")
+    else:
+        # Üst Seçim Paneli: Ürün Arama ve Pazaryeri Seçimi
+        col_setup1, col_setup2 = st.columns(2)
+        
+        with col_setup1:
+            if not products_df.empty:
+                # Barkod ve Ürün Adını birleştirerek liste oluştur
+                product_list = products_df.apply(lambda x: f"{x['barkod']} - {x['urun_adi']}", axis=1).tolist()
+                selected_prod = st.selectbox("🔍 Ürün Ara / Seç (Excel'den):", ["Manuel Giriş"] + product_list)
+                
+                if selected_prod != "Manuel Giriş":
+                    # Seçilen ürünün maliyetini otomatik çek
+                    barcode = selected_prod.split(" - ")[0]
+                    target_row = products_df[products_df['barkod'] == barcode].iloc[0]
+                    initial_maliyet = float(target_row['maliyet'])
+                else:
+                    initial_maliyet = 100.0
+            else:
+                st.info("ℹ️ Henüz ürün yüklenmemiş. Veri Yükleme sekmesini kullanabilirsiniz.")
+                initial_maliyet = 100.0
+        
+        with col_setup2:
+            selected_name = st.selectbox("Satış Yapılacak Pazaryeri:", mps['name'].unique())
+            mp_data = mps[mps['name'] == selected_name].iloc[0].to_dict()
 
         st.divider()
-        c_in, c_out = st.columns([1, 2])
-        with c_in:
-            fiyat = st.number_input("Satış Fiyatı (TL):", value=250.0)
-            kdv_tip = "DAHİL" if mp_set.get('kdv_dahil') == 1 else "HARİÇ"
-            st.info(f"📌 {sel_mp} için KDV **{kdv_tip}** hesaplanıyor.")
+
+        # Fiyat Girişleri ve Sonuçlar
+        col_inputs, col_metrics = st.columns([1, 2])
         
-        # Sizin fonksiyonunuzu çağırıyoruz
-        res = calculate_results(fiyat, maliyet, mp_set)
-        
-        with c_out:
-            st.subheader("Karlılık Sonucu")
-            m1, m2, m3 = st.columns(3)
-            kar_renk = "normal" if res['net_kar'] >= 0 else "inverse"
+        with col_inputs:
+            st.subheader("💰 Fiyatlandırma")
+            maliyet = st.number_input("Ürün Alış Maliyeti (TL):", min_value=0.0, value=initial_maliyet)
+            satis_fiyati = st.number_input("Planlanan Satış Fiyatı (TL):", min_value=0.0, value=250.0)
             
-            m1.metric("Net Kar", f"{res['net_kar']} TL", f"%{res['kar_marji']}", delta_color=kar_renk)
+            kdv_durum = "DAHİL" if mp_data.get('kdv_dahil') == 1 else "HARİÇ"
+            st.info(f"📌 {selected_name} için fiyat KDV **{kdv_durum}** kabul edilir.")
+
+        # Senin calculate_results fonksiyonunu çalıştır
+        res = calculate_results(satis_fiyati, maliyet, mp_data)
+
+        with col_metrics:
+            st.subheader("📈 Karlılık Sonucu")
+            
+            m1, m2, m3 = st.columns(3)
+            # Kar durumuna göre renk (Pozitifse yeşil, negatifse kırmızı)
+            status_color = "normal" if res['net_kar'] >= 0 else "inverse"
+            
+            m1.metric("Net Kar", f"{res['net_kar']} TL", delta=f"%{res['kar_marji']}", delta_color=status_color)
             m2.metric("Toplam Gider", f"{res['toplam_gider']} TL")
             m3.metric("Tahsilat", f"{res['toplam_tahsilat']} TL")
 
-            with st.expander("Gider Detayları"):
-                st.write(f"- Komisyon: {res['komisyon_tutari']} TL")
-                st.write(f"- KDV: {res['kdv_tutari']} TL")
-                st.write(f"- Diğer Giderler: {round(res['toplam_gider'] - res['komisyon_tutari'] - res['kdv_tutari'], 2)} TL")
-    else:
-        st.warning("⚠️ Lütfen önce Pazaryeri Ayarları'ndan bir kayıt ekleyin.")
+            # Detaylı Gider Tablosu
+            with st.expander("🔍 Gider Kalemlerini Gör"):
+                gider_ozet = pd.DataFrame({
+                    "Kalem": ["Komisyon", "Kargo", "KDV", "Kupon", "Stopaj", "Hizmet/Ekstra"],
+                    "Tutar": [
+                        f"{res['komisyon_tutari']} TL",
+                        f"{mp_data['kargo']} TL",
+                        f"{res['kdv_tutari']} TL",
+                        f"{mp_data['kupon']} TL",
+                        f"{mp_data['stopaj']} TL",
+                        f"{mp_data['hizmet'] + mp_data['ekstra']} TL"
+                    ]
+                })
+                st.table(gider_ozet)
 
-# --- 2. AYARLAR SEKİMESİ ---
+# --- 2. PAZARYERİ AYARLARI SEKİMESİ ---
 elif menu == "⚙️ Pazaryeri Ayarları":
-    st.header("⚙️ Pazaryeri Ayarları")
-    with st.expander("➕ Yeni Pazaryeri Ekle"):
-        with st.form("new_mp"):
-            name = st.text_input("Pazaryeri Adı")
-            kdv_dahil = st.toggle("KDV Satış Fiyatına Dahil mi?", value=True)
-            c1, c2, c3 = st.columns(3)
-            kom = c1.number_input("Komisyon %", value=20.0); kar = c2.number_input("Kargo TL", value=80.0); kup = c3.number_input("Kupon TL", value=0.0)
-            c4, c5, c6 = st.columns(3)
-            kdv = c4.number_input("KDV %", value=20.0); stp = c5.number_input("Stopaj %", value=0.0); hiz = c6.number_input("Hizmet TL", value=0.0)
-            eks = st.number_input("Ekstra TL", value=0.0)
+    st.header("⚙️ Pazaryeri Yapılandırması")
+    
+    with st.expander("➕ Yeni Pazaryeri Tanımla"):
+        with st.form("mp_form"):
+            name = st.text_input("Pazaryeri İsmi (Örn: TRENDYOL)")
+            kdv_dahil_mi = st.toggle("KDV Satış Fiyatına Dahil mi?", value=True)
             
-            if st.form_submit_button("Kaydet"):
-                save_marketplace({"name": name.upper(), "komisyon": kom, "kargo": kar, "kupon": kup, "stopaj": stp, "kdv": kdv, "hizmet": hiz, "ekstra": eks, "kdv_dahil": 1 if kdv_dahil else 0})
+            c1, c2, c3 = st.columns(3)
+            komisyon = c1.number_input("Komisyon (%)", value=20.0)
+            kargo = c2.number_input("Kargo (TL)", value=80.0)
+            kupon = c3.number_input("Kupon/İndirim (TL)", value=0.0)
+            
+            c4, c5, c6 = st.columns(3)
+            kdv_orani = c4.number_input("KDV (%)", value=20.0)
+            stopaj = c5.number_input("Stopaj (%)", value=0.0)
+            hizmet = c6.number_input("Hizmet (TL)", value=0.0)
+            
+            ekstra = st.number_input("Ekstra Gider (TL)", value=0.0)
+            
+            if st.form_submit_button("Sisteme Kaydet"):
+                save_marketplace({
+                    "name": name.upper(), "komisyon": komisyon, "kargo": kargo,
+                    "kupon": kupon, "stopaj": stopaj, "kdv": kdv_orani,
+                    "hizmet": hizmet, "ekstra": ekstra, "varsayilan": 0,
+                    "kdv_dahil": 1 if kdv_dahil_mi else 0
+                })
+                st.success("Pazaryeri başarıyla kaydedildi!")
                 st.rerun()
 
-    st.subheader("Mevcut Pazaryerleri")
-    mps = get_all_marketplaces()
-    if not mps.empty:
-        st.dataframe(mps, use_container_width=True)
-        sel_del = st.selectbox("Silinecek Kayıt:", [f"{r['id']} - {r['name']}" for _, r in mps.iterrows()])
-        if st.button("Seçili Pazaryerini Sil", type="primary"):
-            delete_marketplace(int(sel_del.split(" - ")[0]))
-            st.rerun()
+    st.divider()
+    st.subheader("📋 Kayıtlı Pazaryerleri")
+    mps_list = get_all_marketplaces()
+    
+    if not mps_list.empty:
+        st.dataframe(mps_list, use_container_width=True)
+        
+        st.write("### 🗑️ Kayıt Sil")
+        c_sel, c_btn = st.columns([3, 1])
+        with c_sel:
+            del_options = [f"{r['id']} - {r['name']}" for _, r in mps_list.iterrows()]
+            to_delete = st.selectbox("Silinecek Pazaryeri:", del_options)
+        with c_btn:
+            st.write(" ") # Hizalama için
+            if st.button("Seçiliyi Sil", type="primary"):
+                delete_marketplace(int(to_delete.split(" - ")[0]))
+                st.rerun()
 
-# --- 3. YÜKLEME SEKİMESİ ---
+# --- 3. VERİ YÜKLEME SEKİMESİ ---
 elif menu == "📂 Veri Yükleme":
-    st.header("📂 Excel Veri Yükleme")
-    f = st.file_uploader("Dosya Seç", type="xlsx")
-    if f:
-        df = process_excel(f)
-        if not df.empty:
-            st.success("Veriler okundu"); st.dataframe(df)
+    st.header("📂 Excel Ürün Listesi Yükleme")
+    st.info("Not: Excel dosyanızda 'barkod', 'urun_adi' ve 'maliyet' sütunları bulunmalıdır.")
+    
+    uploaded_file = st.file_uploader("Excel Dosyası Seçin (.xlsx)", type="xlsx")
+    if uploaded_file:
+        df_excel = process_excel(uploaded_file)
+        if not df_excel.empty:
+            st.success(f"Başarılı! {len(df_excel)} adet ürün sisteme işlendi.")
+            st.dataframe(df_excel, use_container_width=True)
+        else:
+            st.error("Excel verisi işlenemedi. Sütun isimlerini kontrol edin.")
