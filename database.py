@@ -2,15 +2,12 @@ import sqlite3
 import pandas as pd
 
 def create_connection():
-    """SQLite veritabanına güvenli bağlantı oluşturur."""
     return sqlite3.connect('pazaryeri.db', check_same_thread=False)
 
 def init_db():
-    """Tabloyu oluşturur ve eksik sütun varsa (kdv_dahil gibi) otomatik ekler."""
     conn = create_connection()
     cur = conn.cursor()
-    
-    # 1. Temel tabloyu oluştur (Eğer hiç yoksa)
+    # 1. Ana tabloyu oluştur
     cur.execute('''CREATE TABLE IF NOT EXISTS marketplaces (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT, 
@@ -23,60 +20,42 @@ def init_db():
                     ekstra REAL, 
                     varsayilan INTEGER DEFAULT 0)''')
     
-    # 2. Sütun Kontrolü: kdv_dahil sütunu yoksa ekle (OperationalError çözümü)
+    # 2. kdv_dahil sütunu yoksa ekle (Eski ayarları bozmaz, sadece yeni özellik ekler)
     cur.execute("PRAGMA table_info(marketplaces)")
     columns = [column[1] for column in cur.fetchall()]
-    
     if 'kdv_dahil' not in columns:
-        try:
-            cur.execute("ALTER TABLE marketplaces ADD COLUMN kdv_dahil INTEGER DEFAULT 1")
-            print("Sistem Güncelleme: kdv_dahil sütunu başarıyla eklendi.")
-        except Exception as e:
-            print(f"Sütun eklenirken hata oluştu: {e}")
-
+        cur.execute("ALTER TABLE marketplaces ADD COLUMN kdv_dahil INTEGER DEFAULT 1")
+    
     conn.commit()
     conn.close()
 
 def get_all_marketplaces():
-    """Tüm pazaryeri ayarlarını DataFrame olarak döndürür."""
     conn = create_connection()
-    try:
-        df = pd.read_sql_query("SELECT * FROM marketplaces", conn)
-    except Exception:
-        df = pd.DataFrame()
+    df = pd.read_sql_query("SELECT * FROM marketplaces", conn)
     conn.close()
     return df
 
 def save_marketplace(data):
-    """Yeni pazaryeri ayarlarını kaydeder."""
     conn = create_connection()
     cur = conn.cursor()
-    query = '''INSERT INTO marketplaces 
-               (name, komisyon, kargo, kupon, stopaj, kdv, hizmet, ekstra, varsayilan, kdv_dahil)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'''
-    
-    values = (
-        data['name'], data['komisyon'], data['kargo'], data['kupon'],
-        data['stopaj'], data['kdv'], data['hizmet'], data['ekstra'], 
-        data.get('varsayilan', 0), data.get('kdv_dahil', 1)
-    )
-    
-    cur.execute(query, values)
+    cur.execute('''INSERT INTO marketplaces 
+                   (name, komisyon, kargo, kupon, stopaj, kdv, hizmet, extras, varsayilan, kdv_dahil)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'''.replace("extras", "ekstra"), 
+                (data['name'], data['komisyon'], data['kargo'], data['kupon'],
+                 data['stopaj'], data['kdv'], data['hizmet'], data['ekstra'], 
+                 data.get('varsayilan', 0), data.get('kdv_dahil', 1)))
     conn.commit()
     conn.close()
 
 def delete_marketplace(mp_id):
-    """Belirtilen ID'ye sahip pazaryerini veritabanından siler."""
     conn = create_connection()
     cur = conn.cursor()
     cur.execute("DELETE FROM marketplaces WHERE id=?", (mp_id,))
     conn.commit()
     conn.close()
-
-def clear_all_marketplaces():
-    """Tablodaki tüm verileri temizler."""
+def get_all_products():
     conn = create_connection()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM marketplaces")
-    conn.commit()
+    # Excel'den yüklenen ürünlerin 'products' tablosunda olduğunu varsayıyoruz
+    df = pd.read_sql_query("SELECT * FROM products", conn)
     conn.close()
+    return df

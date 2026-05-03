@@ -1,130 +1,148 @@
-import streamlit as st
-import pandas as pd
+import os
+import re
 import sqlite3
-from database import init_db, get_all_marketplaces, save_marketplace, delete_marketplace
-from excel_reader import process_excel
-from profit_calculator import calculate_results
+import pandas as pd
+from flask import Flask, render_template, request, flash, redirect, url_for
 
-st.set_page_config(page_title="Pro Yönetim", layout="wide", page_icon="💎")
-init_db()
+app = Flask(__name__)
+app.secret_key = "pazaryeri_pro_key_123"
 
-def delete_product_from_db(barcode):
-    conn = sqlite3.connect('pazaryeri.db')
-    conn.execute("DELETE FROM products WHERE barkod = ?", (barcode,))
+# --- VERİTABANI AYARLARI ---
+DB_NAME = 'pazaryeri.db'
+
+def init_db():
+    """Veritabanı ve tabloyu oluşturur."""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS products (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            barkod TEXT,
+            urun_adi TEXT,
+            maliyet REAL,
+            dosya_adi TEXT
+        )
+    ''')
     conn.commit()
     conn.close()
 
-with st.sidebar:
-    st.title("💎 Pro Yönetim")
-    menu = st.radio("Menü Seçiniz:", ["📊 Analiz", "⚙️ Pazaryeri Ayarları", "📂 Veri Yükleme"])
+# Uygulama başlarken veritabanını hazırla
+init_db()
 
-# --- 1. ANALİZ ---
-if menu == "📊 Analiz":
-    st.header("📊 Genel Kar-Zarar Analizi")
-    mps = get_all_marketplaces()
-    
-    conn = sqlite3.connect('pazaryeri.db')
+# --- EXCEL İŞLEME MOTORU ---
+def process_excel_logic(file):
     try:
-        products_df = pd.read_sql_query("SELECT * FROM products", conn)
-    except:
-        products_df = pd.DataFrame()
-    conn.close()
-
-    if mps.empty:
-        st.warning("⚠️ Önce Pazaryeri Ayarları yapın.")
-    else:
-        col_setup1, col_setup2 = st.columns(2)
-        with col_setup1:
-            if not products_df.empty:
-                product_list = products_df.apply(lambda x: f"{x['barkod']} | {x['urun_adi']}", axis=1).tolist()
-                selected_prod = st.selectbox("🔍 Ürün Ara:", ["Manuel Giriş"] + product_list)
-                if selected_prod != "Manuel Giriş":
-                    barcode = selected_prod.split(" | ")[0]
-                    target_row = products_df[products_df['barkod'] == barcode].iloc[0]
-                    initial_maliyet = float(target_row['maliyet'])
-                else: initial_maliyet = 100.0
-            else:
-                st.info("ℹ️ Ürün hafızası boş.")
-                initial_maliyet = 100.0
+        xls = pd.ExcelFile(file)
+        all_products = []
         
-        with col_setup2:
-            sel_mp = st.selectbox("Pazaryeri:", mps['name'].unique())
-            mp_data = mps[mps['name'] == sel_mp].iloc[0].to_dict()
-
-        st.divider()
-        c_in, c_res = st.columns([1, 2])
-        with c_in:
-            maliyet = st.number_input("Alış Maliyeti:", value=initial_maliyet)
-            target_margin = st.number_input("🎯 Hedef Kar Marjı (%)", value=20.0)
+        for sheet_name in xls.sheet_names:
+            # Excel'in ilk 10 satırını oku (başlığı bulmak için)
+            df_header_check = pd.read_excel(file, sheet_name=sheet_name, header=None).head(10)
             
-            kom, stp, kdv = mp_data['komisyon']/100, mp_data['stopaj']/100, mp_data['kdv']/100
-            sabit = mp_data['kargo'] + mp_data['hizmet'] + mp_data['ekstra'] + mp_data['kupon']
-            kdv_e = (kdv / (1 + kdv)) if mp_data['kdv_dahil'] == 1 else 0
-            payda = 1 - (kom + stp + (target_margin/100) + kdv_e)
+            header_idx = None
+            # "MALZEME ADI" yazan satırı dinamik bul
+            for i, row in df_header_check.iterrows():
+                row_vals = [str(val).strip().upper() for val in row.values if pd.notna(val)]
+                if "MALZEME ADI" in row_vals:
+                    header_idx = i
+                    break
             
-            onerilen = (maliyet + sabit) / payda if payda > 0 else 0
-            st.success(f"💡 Öneri: **{round(onerilen, 2)} TL**")
-            satis_fiyati = st.number_input("Satış Fiyatı (TL):", value=round(onerilen, 2))
+            if header_idx is None:
+                continue # Başlık bulunamadıysa bu sayfayı atla
 
-        res = calculate_results(satis_fiyati, maliyet, mp_data)
-        with c_res:
-            st.subheader("📈 Karlılık Sonucu")
-            m1, m2 = st.columns(2)
-            m1.metric("Net Kar", f"{res['net_kar']} TL", f"%{res['kar_marji']}")
-            m2.metric("Toplam Gider", f"{res['toplam_gider']} TL")
-            with st.expander("🔍 Gider Detayı"):
-                st.table(pd.DataFrame({"Kalem": ["Komisyon", "Kargo", "KDV", "Diger"], 
-                                      "Tutar": [f"{res['komisyon_tutari']} TL", f"{mp_data['kargo']} TL", 
-                                                f"{res['kdv_tutari']} TL", f"{mp_data['hizmet']+mp_data['ekstra']} TL"]}))
+            # Sayfayı bulduğumuz satırdan itibaren oku
+            df = pd.read_excel(file, sheet_name=sheet_name, header=header_idx)
+            
+            # Sütun isimlerini temizle
+            df.columns = [str(c).strip().upper() for c in df.columns]
 
-# --- 2. AYARLAR ---
-elif menu == "⚙️ Pazaryeri Ayarları":
-    st.header("⚙️ Pazaryeri Yapılandırması")
-    with st.expander("➕ Yeni Ekle"):
-        with st.form("mp_form"):
-            name = st.text_input("İsim"); kdv_d = st.toggle("KDV Dahil", value=True)
-            c1, c2, c3 = st.columns(3); kom = c1.number_input("Komisyon (%)"); kar = c2.number_input("Kargo"); kup = c3.number_input("Kupon")
-            c4, c5, c6 = st.columns(3); kdv = c4.number_input("KDV (%)"); stp = c5.number_input("Stopaj"); hiz = c6.number_input("Hizmet")
-            eks = st.number_input("Ekstra")
-            if st.form_submit_button("Kaydet"):
-                save_marketplace({"name": name.upper(), "komisyon": kom, "kargo": kar, "kupon": kup, "stopaj": stp, "kdv": kdv, "hizmet": hiz, "ekstra": eks, "kdv_dahil": 1 if kdv_d else 0})
-                st.rerun()
-    mps_list = get_all_marketplaces()
-    if not mps_list.empty:
-        st.dataframe(mps_list)
-        sel = st.selectbox("Sil:", mps_list['name'].unique())
-        if st.button("Sil"):
-            delete_marketplace(int(mps_list[mps_list['name']==sel]['id'].values[0])); st.rerun()
+            # Sizin Excel yapınızdaki sütunları eşleştir
+            # 'MALZEME ADI' -> urun_adi, 'BİRİM FİYATI' -> maliyet, 'CM.' -> boyut
+            col_map = {
+                'MALZEME ADI': 'urun_adi',
+                'BİRİM FİYATI': 'maliyet',
+                'CM.': 'boyut'
+            }
+            df = df.rename(columns=col_map)
 
-# --- 3. VERİ YÜKLEME ---
-elif menu == "📂 Veri Yükleme":
-    st.header("📂 Veri Yönetimi")
-    t1, t2 = st.tabs(["📤 Excel Yükle", "🗑️ Hafızayı Yönet"])
-    
-    with t1:
-        st.info("Not: Excel dosyanızda 'MALZEME ADI', 'BİRİM FİYATI' ve 'CM.' sütunları bulunmalıdır.")
-        uploaded_file = st.file_uploader("Excel Dosyası Seçin", type="xlsx")
-        if uploaded_file:
-            df_excel = process_excel(uploaded_file)
-            if not df_excel.empty:
-                # GÖRSELDEKİ INFO KISMI (image_e2e114.png)
-                st.success(f"✅ Başarılı! {len(df_excel)} adet ürün sisteme işlendi.")
-                st.write("### Yüklenen Veri Özeti")
-                st.dataframe(df_excel, use_container_width=True)
-                st.balloons()
-            else:
-                st.error("❌ Dosya işlenemedi. Sütun isimlerini kontrol edin.")
+            # Sadece ihtiyacımız olan sütunları al (Eğer varsa)
+            needed_cols = [c for c in ['urun_adi', 'maliyet', 'boyut'] if c in df.columns]
+            df = df[needed_cols]
 
-    with t2:
-        conn = sqlite3.connect('pazaryeri.db')
-        all_p = pd.read_sql_query("SELECT * FROM products", conn)
+            # Boş satırları at
+            df = df.dropna(subset=['urun_adi', 'maliyet'])
+            
+            # Sayı temizleme fonksiyonu
+            def clean_price(price):
+                try:
+                    if pd.isna(price): return 0.0
+                    p_str = str(price).replace('.', '').replace(',', '.')
+                    res = re.findall(r"[-+]?\d*\.\d+|\d+", p_str)
+                    return float(res[0]) if res else 0.0
+                except:
+                    return 0.0
+
+            df['maliyet'] = df['maliyet'].apply(clean_price)
+            df = df[df['maliyet'] > 0] # 0 olanları ele
+
+            # Boyut bilgisini isme ekle
+            if 'boyut' in df.columns:
+                df['urun_adi'] = df['urun_adi'].astype(str) + " (" + df['boyut'].astype(str) + " CM)"
+
+            all_products.append(df)
+
+        if not all_products:
+            return None
+
+        final_df = pd.concat(all_products, ignore_index=True)
+        final_df['dosya_adi'] = getattr(file, 'filename', 'Excel_Dosyasi')
+        final_df['barkod'] = [f"BRK-{1000 + i}" for i in range(len(final_df))]
+        
+        # Veritabanına Yazma
+        conn = sqlite3.connect(DB_NAME)
+        final_df[['barkod', 'urun_adi', 'maliyet', 'dosya_adi']].to_sql('products', conn, if_exists='append', index=False)
         conn.close()
-        if not all_p.empty:
-            st.write(f"Hafızada **{len(all_p)}** ürün kayıtlı.")
-            sel_p = st.selectbox("Ürün Sil:", all_p.apply(lambda x: f"{x['barkod']} - {x['urun_adi']}", axis=1))
-            if st.button("Seçileni Sil"):
-                delete_product_from_db(sel_p.split(" - ")[0]); st.rerun()
-            if st.button("🚨 TÜM HAFIZAYI TEMİZLE"):
-                conn = sqlite3.connect('pazaryeri.db'); conn.execute("DELETE FROM products"); conn.commit(); conn.close()
-                st.rerun()
-            st.dataframe(all_p)
+        
+        return len(final_df)
+
+    except Exception as e:
+        print(f"Hata detayı: {e}")
+        return None
+
+# --- ROUTE'LAR (SAYFALAR) ---
+
+@app.route('/')
+def index():
+    return render_template('index.html') # Veya ana sayfanız hangisiyse
+
+@app.route('/upload', methods=['POST'])
+def upload_file():
+    if 'file' not in request.files:
+        flash("Dosya seçilmedi", "danger")
+        return redirect(request.referrer)
+    
+    file = request.files['file']
+    if file.filename == '':
+        flash("Dosya adı boş", "danger")
+        return redirect(request.referrer)
+
+    count = process_excel_logic(file)
+    
+    if count:
+        flash(f"Başarılı! {count} adet ürün veritabanına eklendi.", "success")
+    else:
+        flash("Dosya işlenemedi. Sütun isimlerini veya formatı kontrol edin.", "danger")
+        
+    return redirect(request.referrer)
+
+@app.route('/products')
+def list_products():
+    conn = sqlite3.connect(DB_NAME)
+    # Veritabanından çekerek sayfayı yenileseniz de gitmemesini sağlıyoruz
+    df = pd.read_sql_query("SELECT * FROM products", conn)
+    conn.close()
+    products = df.to_dict(orient='records')
+    return render_template('analiz.html', products=products)
+
+if __name__ == '__main__':
+    app.run(debug=True, port=5000)
