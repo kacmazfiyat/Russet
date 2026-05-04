@@ -6,9 +6,9 @@ import re
 import requests
 import xml.etree.ElementTree as ET
 
-st.set_page_config(page_title="Pazaryeri Fiyat Motoru v59", layout="wide")
+st.set_page_config(page_title="Pazaryeri Fiyat Motoru v60", layout="wide")
 
-# --- TCMB KUR ÇEKME ---
+# --- YARDIMCI FONKSİYONLAR ---
 def get_tcmb_kurlar():
     try:
         response = requests.get("https://www.tcmb.gov.tr/kurlar/today.xml", timeout=10)
@@ -22,7 +22,6 @@ def get_tcmb_kurlar():
         return kurlar
     except: return None
 
-# --- GÜVENLİK ---
 def check_password():
     if "password_correct" not in st.session_state:
         st.session_state["password_correct"] = False
@@ -37,7 +36,6 @@ def check_password():
         return False
     return True
 
-# --- GOOGLE SHEETS ---
 @st.cache_resource
 def get_gsheet_client():
     scope = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
@@ -55,7 +53,7 @@ def get_worksheet(sheet_name):
 if check_password():
     menu = st.sidebar.radio("Menü", ["🔍 Ürün Analizi", "⚙️ Ayarlar", "📥 Veri Yükle", "🗑️ Veritabanı Yönetimi"])
 
-    # 1. ANALİZ SAYFASI
+    # --- 1. ANALİZ (KOD EKLENDİ) ---
     if menu == "🔍 Ürün Analizi":
         st.subheader("🔍 Ürün Fiyat Analizi")
         ws_set, ws_prod = get_worksheet("Settings"), get_worksheet("Products")
@@ -66,10 +64,13 @@ if check_password():
             if not s_data.empty and not p_data.empty:
                 p_list = list(s_data['platform'].unique())
                 target = st.selectbox("Platform Seçin", p_list)
-                search = st.text_input("Ürün Ara...", placeholder="Örn: Döner Kesme")
+                search = st.text_input("Ürün veya Kod Ara...", placeholder="Örn: 5.1001 veya Döner")
                 
                 s = s_data[s_data['platform'] == target].iloc[0]
-                df = p_data[p_data['urun_adi'].str.contains(search, case=False, na=False)].copy()
+                # Arama kapsamına kodu da ekledik
+                mask = (p_data['kod'].astype(str).str.contains(search, case=False, na=False)) | \
+                       (p_data['urun_adi'].str.contains(search, case=False, na=False))
+                df = p_data[mask].copy()
                 
                 def calc_price(row):
                     try:
@@ -84,9 +85,18 @@ if check_password():
 
                 if not df.empty:
                     df['Satış Fiyatı'] = df.apply(calc_price, axis=1)
-                    st.dataframe(df.rename(columns={'urun_adi':'Ürün Adı','boy':'Boy','maliyet':'Maliyet','doviz':'Kur','kategori':'Kategori'}), use_container_width=True, hide_index=True)
+                    # Sütun sıralaması ve isimlendirmesi (KOD EN SOLDA)
+                    final_df = df[['kod', 'urun_adi', 'boy', 'maliyet', 'doviz', 'Satış Fiyatı', 'kategori']]
+                    st.dataframe(final_df.rename(columns={
+                        'kod': 'Stok Kodu',
+                        'urun_adi': 'Ürün Adı',
+                        'boy': 'Ölçü',
+                        'maliyet': 'Maliyet',
+                        'doviz': 'Kur',
+                        'kategori': 'Kategori'
+                    }), use_container_width=True, hide_index=True)
 
-    # 2. AYARLAR
+    # --- 2. AYARLAR ---
     elif menu == "⚙️ Ayarlar":
         st.subheader("⚙️ Platform ve Kur Ayarları")
         ws_set = get_worksheet("Settings")
@@ -120,7 +130,7 @@ if check_password():
                     except: ws_set.append_row(new_row)
                     st.success("Kaydedildi!")
 
-    # 3. VERİ YÜKLE (GÖRSELDEKİ BİRLEŞTİRİLMİŞ HÜCRE SORUNUNU ÇÖZEN KISIM)
+    # --- 3. VERİ YÜKLE (MALZEME KODU EŞLEŞTİRME EKLENDİ) ---
     elif menu == "📥 Veri Yükle":
         st.subheader("📥 Excel'den Veri Aktarımı")
         file = st.file_uploader("Excel Dosyası", type=['xlsx'])
@@ -130,12 +140,12 @@ if check_password():
                 all_rows = []
                 for sheet_name in xls.sheet_names:
                     df = pd.read_excel(file, sheet_name=sheet_name, header=None).fillna("")
+                    code_col, price_col, name_col, size_col = -1, -1, -1, -1
                     
-                    price_col, name_col, size_col = -1, -1, -1
-                    
-                    # Başlık Satırı Tespiti
                     for i in range(min(25, len(df))):
                         row_vals = [str(val).upper().strip() for val in df.iloc[i].values]
+                        if any(x in row_vals for x in ["MALZEME KODU", "STOK KODU", "KOD"]): 
+                            code_col = next(idx for idx, v in enumerate(row_vals) if v in ["MALZEME KODU", "STOK KODU", "KOD"])
                         if "BİRİM FİYATI" in row_vals: price_col = row_vals.index("BİRİM FİYATI")
                         if any(x in row_vals for x in ["MALZEME ADI", "ÜRÜN ADI"]):
                             name_col = next(idx for idx, v in enumerate(row_vals) if v in ["MALZEME ADI", "ÜRÜN ADI"])
@@ -144,8 +154,10 @@ if check_password():
                     
                     if price_col != -1 and name_col != -1:
                         for idx, row in df.iloc[i+1:].iterrows():
-                            # 1. HÜCRE BİRLEŞTİRME ÇÖZÜMÜ:
-                            # MALZEME ADI sütunu boşsa sağındaki sütuna bak (Merged Cell desteği)
+                            # Malzeme Kodu
+                            m_kod = str(row[code_col]).strip() if code_col != -1 else "-"
+                            
+                            # Ürün Adı (Merged Cell desteğiyle)
                             raw_name = str(row[name_col]).strip()
                             if (raw_name == "" or raw_name.upper() == "NAN") and name_col + 1 < len(row):
                                 alt_name = str(row[name_col + 1]).strip()
@@ -159,7 +171,7 @@ if check_password():
                                 v = str(row[size_col]).strip()
                                 extracted_boy = v if "CM" in v.upper() else f"{v} CM"
                             
-                            # Fiyat ve Kur (Fiyatın hemen sağındaki hücre)
+                            # Fiyat ve Kur
                             try:
                                 f_raw = row[price_col]
                                 f_clean = float(str(f_raw).replace('.', '').replace(',', '.'))
@@ -169,18 +181,20 @@ if check_password():
                             d_raw = str(row[d_col]).strip().upper() if d_col < len(row) else "TL"
                             d_tipi = "EUR" if "EUR" in d_raw or "€" in d_raw else ("USD" if "USD" in d_raw or "$" in d_raw else "TL")
                             
-                            all_rows.append([raw_name, extracted_boy, f_clean, d_tipi, sheet_name])
+                            # Google Sheets "Products" sayfası yapısı: [KOD, AD, BOY, MALİYET, DÖVİZ, KATEGORİ]
+                            all_rows.append([m_kod, raw_name, extracted_boy, f_clean, d_tipi, sheet_name])
                 
                 if all_rows:
                     ws_prod = get_worksheet("Products")
+                    # Önemli: Sheets sayfanızın ilk satırı başlık olmalı: kod, urun_adi, boy, maliyet, doviz, kategori
                     ws_prod.append_rows(all_rows, value_input_option='RAW')
-                    st.success(f"✅ {len(all_rows)} ürün eklendi!")
+                    st.success(f"✅ {len(all_rows)} ürün (Kodlarıyla beraber) eklendi!")
 
-    # 4. TEMİZLEME
+    # --- 4. TEMİZLEME ---
     elif menu == "🗑️ Veritabanı Yönetimi":
-        st.subheader("🗑️ Tüm Ürünleri Sil")
-        if st.checkbox("Veritabanını sıfırlamayı onaylıyorum") and st.button("SİL"):
+        st.subheader("🗑️ Veritabanı Kontrolü")
+        if st.checkbox("Tüm ürün verilerini silmeyi onaylıyorum") and st.button("SİSTEMİ SIFIRLA"):
             ws_prod = get_worksheet("Products")
             if ws_prod:
-                ws_prod.batch_clear(["A2:E20000"])
-                st.success("Veritabanı temizlendi.")
+                ws_prod.batch_clear(["A2:F20000"]) # F sütununa kadar temizler
+                st.success("Tüm ürünler silindi.")
