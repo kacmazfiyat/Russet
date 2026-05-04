@@ -6,10 +6,11 @@ import numpy as np
 import time
 from datetime import datetime
 
-st.set_page_config(page_title="Pazaryeri Fiyat Motoru v52", layout="wide")
+st.set_page_config(page_title="Pazaryeri Fiyat Motoru v53", layout="wide")
 
 # --- KORUMA VE YARDIMCI FONKSİYONLAR ---
 def prepare_for_gsheets(value):
+    """NaN ve geçersiz JSON değerlerini temizler."""
     if pd.isna(value) or value is None or str(value).lower() in ["nan", "inf", "-inf"]:
         return ""
     if isinstance(value, (datetime, pd.Timestamp)):
@@ -47,75 +48,117 @@ except Exception as e:
     st.error(f"Bağlantı Hatası: {e}")
     st.stop()
 
-# --- MENÜ ---
+# --- MENÜ SİSTEMİ ---
 menu = st.sidebar.radio("Menü", ["🔍 Arama & Düzenle", "⚙️ Ayarlar", "📥 Veri Yükle & Temizle & Backup"])
 
-# --- 1. AYARLAR SAYFASI (BOŞ GELMEYEN VERSİYON) ---
-if menu == "⚙️ Ayarlar":
-    st.subheader("⚙️ Platform ve Kur Ayarları")
-    
-    # Mevcut ayarları oku
-    settings_data = ws_set.get_all_records()
-    s_df = pd.DataFrame(settings_data)
-    
-    platforms = ["Trendyol", "Hepsiburada", "Amazon", "N11"]
-    selected_p = st.selectbox("Düzenlenecek Platformu Seçin", platforms)
-    
-    # Seçili platformun mevcut verilerini bul veya varsayılan ata
-    if not s_df.empty and selected_p in s_df['platform'].values:
-        current = s_df[s_df['platform'] == selected_p].iloc[0].to_dict()
-    else:
-        # EĞER VERİTABANI BOŞSA GELECEK VARSAYILANLAR
-        current = {
-            "komisyon": 20.0, "kargo": 85.0, "hizmet": 15.0, 
-            "kar": 20.0, "kdv": 20.0, "eur": 35.50, "usd": 33.00
-        }
+# --- 1. VERİ YÜKLEME, TEMİZLEME VE BACKUP ---
+if menu == "📥 Veri Yükle & Temizle & Backup":
+    st.subheader("📥 Veritabanı Yönetim Merkezi")
 
-    with st.form("settings_form"):
-        col1, col2 = st.columns(2)
-        
-        # Değerler artık 'current' içinden otomatik geliyor, boş kalmıyor
-        kom = col1.number_input("Komisyon (%)", value=safe_float(current.get('komisyon', 20.0)), step=0.5)
-        kar = col2.number_input("Hedef Kâr (%)", value=safe_float(current.get('kar', 20.0)), step=0.5)
-        kargo = col1.number_input("Kargo Ücreti (TL)", value=safe_float(current.get('kargo', 85.0)), step=1.0)
-        hizmet = col2.number_input("Hizmet Bedeli (TL)", value=safe_float(current.get('hizmet', 15.0)), step=1.0)
-        
-        st.divider()
-        col3, col4 = st.columns(2)
-        eur_k = col3.number_input("EURO Kuru (TL)", value=safe_float(current.get('eur', 35.50)), format="%.2f")
-        usd_k = col4.number_input("USD Kuru (TL)", value=safe_float(current.get('usd', 33.00)), format="%.2f")
-        
-        if st.form_submit_button("Ayarları Güncelle ve Kaydet"):
-            # Güncellenecek satır
-            new_row = [selected_p, kom, kargo, hizmet, kar, 20, 0, eur_k, usd_k]
+    # A) UPLOAD (YÜKLEME) BÖLÜMÜ - GERİ GELDİ
+    st.write("### 📤 Excel'den Ürün Yükle")
+    file = st.file_uploader("Excel Dosyası Seçin (.xlsx)", type=['xlsx'])
+    
+    if file and st.button("Yedekle ve Aktarımı Başlat"):
+        with st.spinner("Önce mevcut veriler yedekleniyor, sonra aktarılıyor..."):
+            # Mevcut olanı yedekle
+            current_raw = ws_prod.get_all_records()
+            if current_raw:
+                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                clean_backup = [[ts] + [prepare_for_gsheets(v) for v in row.values()] for row in current_raw]
+                ws_back.append_rows(clean_backup)
+
+            # Excel'i işle
+            xls = pd.ExcelFile(file)
+            all_rows = []
+            for sheet in xls.sheet_names:
+                df = pd.read_excel(file, sheet_name=sheet, header=None)
+                p_col, n_col, s_col = -1, -1, -1
+                for i in range(min(20, len(df))):
+                    row_vals = [str(v).upper().strip() for v in df.iloc[i].values]
+                    if any(x in row_vals for x in ["MALZEME ADI", "ÜRÜN ADI", "AÇIKLAMA"]):
+                        n_col = next(idx for idx, v in enumerate(row_vals) if v in ["MALZEME ADI", "ÜRÜN ADI", "AÇIKLAMA"])
+                    if any(x in row_vals for x in ["BOY", "ÖLÇÜ", "EBAT"]):
+                        s_col = next(idx for idx, v in enumerate(row_vals) if v in ["BOY", "ÖLÇÜ", "EBAT"])
+                    if "BİRİM FİYATI" in row_vals: p_col = row_vals.index("BİRİM FİYATI")
+
+                if n_col != -1 and p_col != -1:
+                    for _, row in df.iloc[i+1:].iterrows():
+                        name = prepare_for_gsheets(row[n_col])
+                        if not name: continue
+                        size = prepare_for_gsheets(row[s_col]) if s_col != -1 else "-"
+                        price = safe_float(row[p_col])
+                        cur_raw = str(row[p_col+1]).upper() if len(row) > p_col+1 else "TL"
+                        d_tipi = "EUR" if "EUR" in cur_raw or "€" in cur_raw else ("USD" if "USD" in cur_raw or "$" in cur_raw else "TL")
+                        all_rows.append([name, size, price, d_tipi, sheet])
             
-            # Google Sheets'te platformu ara, varsa güncelle yoksa ekle
-            try:
-                cell = ws_set.find(selected_p)
-                ws_set.update(f"A{cell.row}:I{cell.row}", [new_row])
-            except:
-                ws_set.append_row(new_row)
-                
-            st.success(f"✅ {selected_p} ayarları başarıyla kaydedildi!")
-            time.sleep(1)
-            st.rerun()
+            if all_rows:
+                ws_prod.append_rows(all_rows, value_input_option='RAW')
+                st.success(f"✅ {len(all_rows)} ürün yüklendi ve eski veriler yedeklendi!")
 
-# --- 2. DİĞER TÜM SİSTEMLER (SİL, BACKUP, YÜKLE) ---
-elif menu == "📥 Veri Yükle & Temizle & Backup":
-    # Bu bölüm v51'deki silme ve yedekleme korumalarını aynen korur
-    st.subheader("📥 Veritabanı Yönetimi")
-    
-    with st.expander("🗑️ Veritabanını Tamamen Sil"):
-        st.warning("Bu işlem geri alınamaz!")
-        del_confirm = st.text_input("Silmek için (sil) yazın:", key="del_final")
-        if st.button("Sistemi Sıfırla"):
+    st.divider()
+
+    # B) SİL (TEMİZLEME) BÖLÜMÜ
+    with st.expander("🗑️ Veritabanını Temizle"):
+        st.error("Bu işlem tüm ürün listesini sıfırlar.")
+        del_confirm = st.text_input("Onay için (sil) yazın:", key="del_final")
+        if st.button("Hepsini Sil"):
             if del_confirm.lower() == "sil":
                 ws_prod.clear()
                 ws_prod.append_row(["urun_adi", "boy", "maliyet", "doviz", "sayfa_adi"])
-                st.success("✅ Tüm ürünler silindi!")
+                st.success("✅ Veritabanı sıfırlandı!")
                 time.sleep(1.5)
                 st.rerun()
-    
+
     st.divider()
-    # (Yedekleme ve Excel Yükleme kodları v51 ile aynıdır, bozulmadı)
-    # ...
+
+    # C) BACKUP (YEDEK) GERİ YÜKLEME
+    with st.expander("⏪ Yedekten Geri Dön"):
+        back_df = pd.DataFrame(ws_back.get_all_records())
+        if not back_df.empty:
+            dates = sorted(back_df['Tarih'].unique().tolist(), reverse=True)
+            sel_date = st.selectbox("Yedek Tarihi Seçin:", dates)
+            if st.button("Geri Yüklemeyi Başlat"):
+                res_list = back_df[back_df['Tarih'] == sel_date].drop(columns=['Tarih']).values.tolist()
+                ws_prod.clear()
+                ws_prod.append_row(["urun_adi", "boy", "maliyet", "doviz", "sayfa_adi"])
+                ws_prod.append_rows(res_list)
+                st.success(f"✅ {sel_date} tarihli yedeğe dönüldü!")
+                time.sleep(1.5)
+                st.rerun()
+
+# --- 2. AYARLAR (BOŞ GELMEYEN) ---
+elif menu == "⚙️ Ayarlar":
+    st.subheader("⚙️ Platform Ayarları")
+    s_df = pd.DataFrame(ws_set.get_all_records())
+    plats = ["Trendyol", "Hepsiburada", "Amazon", "N11"]
+    sel_p = st.selectbox("Platform Seç", plats)
+    
+    current = s_df[s_df['platform'] == sel_p].iloc[0].to_dict() if not s_df.empty and sel_p in s_df['platform'].values else {"komisyon": 20.0, "kargo": 85.0, "hizmet": 15.0, "kar": 20.0, "eur": 35.5, "usd": 33.0}
+
+    with st.form("set_form"):
+        c1, c2 = st.columns(2)
+        kom = c1.number_input("Komisyon (%)", value=safe_float(current.get('komisyon')))
+        kar = c2.number_input("Kâr (%)", value=safe_float(current.get('kar')))
+        kargo = c1.number_input("Kargo (TL)", value=safe_float(current.get('kargo')))
+        hizmet = c2.number_input("Hizmet (TL)", value=safe_float(current.get('hizmet')))
+        eur = c1.number_input("Euro Kuru", value=safe_float(current.get('eur')))
+        usd = c2.number_input("Dolar Kuru", value=safe_float(current.get('usd')))
+        
+        if st.form_submit_button("Ayarları Kaydet"):
+            row = [sel_p, kom, kargo, hizmet, kar, 20, 0, eur, usd]
+            try:
+                cell = ws_set.find(sel_p)
+                ws_set.update(f"A{cell.row}:I{cell.row}", [row])
+            except:
+                ws_set.append_row(row)
+            st.success("Ayarlar güncellendi!")
+
+# --- 3. ARAMA & DÜZENLE ---
+elif menu == "🔍 Arama & Düzenle":
+    st.subheader("🔍 Ürün Arama")
+    p_df = pd.DataFrame(ws_prod.get_all_records())
+    if not p_df.empty:
+        search = st.text_input("Ürün Ara...")
+        filtered = p_df[p_df['urun_adi'].astype(str).str.contains(search, case=False)]
+        st.dataframe(filtered, use_container_width=True)
