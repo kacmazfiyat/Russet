@@ -6,9 +6,9 @@ import re
 import requests
 import xml.etree.ElementTree as ET
 
-st.set_page_config(page_title="Pazaryeri Fiyat Motoru v61", layout="wide")
+st.set_page_config(page_title="Pazaryeri Fiyat Motoru v62", layout="wide")
 
-# --- YARDIMCI FONKSİYONLAR ---
+# --- TCMB KUR ÇEKME ---
 def get_tcmb_kurlar():
     try:
         response = requests.get("https://www.tcmb.gov.tr/kurlar/today.xml", timeout=10)
@@ -22,6 +22,7 @@ def get_tcmb_kurlar():
         return kurlar
     except: return None
 
+# --- GÜVENLİK ---
 def check_password():
     if "password_correct" not in st.session_state:
         st.session_state["password_correct"] = False
@@ -36,6 +37,7 @@ def check_password():
         return False
     return True
 
+# --- GOOGLE SHEETS BAĞLANTISI ---
 @st.cache_resource
 def get_gsheet_client():
     scope = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
@@ -49,14 +51,15 @@ def get_worksheet(sheet_name):
         return sh.worksheet(sheet_name)
     except: return None
 
-# --- ANA UYGULAMA ---
+# --- ANA PROGRAM ---
 if check_password():
     menu = st.sidebar.radio("Menü", ["🔍 Ürün Analizi", "⚙️ Ayarlar", "📥 Veri Yükle", "🗑️ Veritabanı Yönetimi"])
 
-    # --- 1. ANALİZ ---
+    # 1. ANALİZ EKRANI
     if menu == "🔍 Ürün Analizi":
         st.subheader("🔍 Ürün Fiyat Analizi")
         ws_set, ws_prod = get_worksheet("Settings"), get_worksheet("Products")
+        
         if ws_set and ws_prod:
             s_data = pd.DataFrame(ws_set.get_all_records())
             p_raw = ws_prod.get_all_records()
@@ -64,18 +67,15 @@ if check_password():
             if not s_data.empty and p_raw:
                 p_data = pd.DataFrame(p_raw)
                 
-                # KRİTİK KONTROL: Eğer 'kod' sütunu yoksa geçici olarak oluştur
-                if 'kod' not in p_data.columns:
-                    st.warning("Veritabanında 'kod' başlığı bulunamadı. Lütfen 'Veri Yükle' kısmından yeni Excel yükleyin.")
-                    p_data['kod'] = "-"
+                # Sütun Kontrolü
+                if 'kod' not in p_data.columns: p_data['kod'] = "-"
 
                 p_list = list(s_data['platform'].unique())
-                target = st.selectbox("Platform Seçin", p_list)
-                search = st.text_input("Ürün veya Kod Ara...", placeholder="Aramak istediğiniz kelimeyi yazın")
+                target = st.selectbox("Hesaplama Yapılacak Platform", p_list)
+                search = st.text_input("Kod veya Ürün Adı ile Ara...", placeholder="Örn: 5.1001 veya Döner")
                 
                 s = s_data[s_data['platform'] == target].iloc[0]
                 
-                # Arama Filtresi
                 mask = (p_data['kod'].astype(str).str.contains(search, case=False, na=False)) | \
                        (p_data['urun_adi'].astype(str).str.contains(search, case=False, na=False))
                 df = p_data[mask].copy()
@@ -93,19 +93,20 @@ if check_password():
 
                 if not df.empty:
                     df['Satış Fiyatı'] = df.apply(calc_price, axis=1)
-                    cols = ['kod', 'urun_adi', 'boy', 'maliyet', 'doviz', 'Satış Fiyatı', 'kategori']
-                    # Sütunların varlığını kontrol et
-                    existing_cols = [c for c in cols if c in df.columns or c == 'Satış Fiyatı']
-                    st.dataframe(df[existing_cols].rename(columns={
-                        'kod': 'Stok Kodu', 'urun_adi': 'Ürün Adı', 'boy': 'Ölçü',
-                        'maliyet': 'Maliyet', 'doviz': 'Kur', 'kategori': 'Kategori'
+                    # Dashboard'da Malzeme Kodu en solda görünecek
+                    display_cols = ['kod', 'urun_adi', 'boy', 'maliyet', 'doviz', 'Satış Fiyatı', 'kategori']
+                    st.dataframe(df[display_cols].rename(columns={
+                        'kod': 'Malzeme Kodu', 
+                        'urun_adi': 'Ürün Adı', 
+                        'boy': 'Ölçü/CM',
+                        'maliyet': 'Birim Maliyet', 
+                        'doviz': 'Döviz', 
+                        'kategori': 'Kategori'
                     }), use_container_width=True, hide_index=True)
-            else:
-                st.info("Henüz veri yüklenmemiş veya ayarlar yapılmamış.")
 
-    # --- 2. AYARLAR ---
+    # 2. AYARLAR
     elif menu == "⚙️ Ayarlar":
-        st.subheader("⚙️ Ayarlar")
+        st.subheader("⚙️ Platform ve Kur Ayarları")
         ws_set = get_worksheet("Settings")
         if ws_set:
             settings_df = pd.DataFrame(ws_set.get_all_records())
@@ -113,79 +114,91 @@ if check_password():
             sel_plat = st.selectbox("Platform", platforms)
             dv = settings_df[settings_df['platform'] == sel_plat].iloc[0].to_list() if not settings_df.empty and sel_plat in settings_df['platform'].values else [sel_plat, 20.0, 80.0, 15.0, 30.0, 20.0, 0, 33.50, 36.50]
 
-            if st.button("🔄 TCMB Kurlarını Getir"):
-                g_kur = get_tcmb_kurlar()
-                if g_kur:
-                    st.session_state["eur_val"], st.session_state["usd_val"] = g_kur["EUR"], g_kur["USD"]
-                    st.success("Kurlar başarıyla çekildi!")
+            if st.button("🔄 Güncel Kurları Getir"):
+                k = get_tcmb_kurlar()
+                if k:
+                    st.session_state["eur_v"], st.session_state["usd_v"] = k["EUR"], k["USD"]
+                    st.success(f"Kurlar güncellendi! USD: {k['USD']} - EUR: {k['EUR']}")
 
             with st.form("set_form"):
                 c1, c2, c3 = st.columns(3)
                 kom = c1.number_input("Komisyon %", value=float(dv[1]))
-                kargo = c2.number_input("Kargo TL", value=float(dv[2]))
-                hizmet = c3.number_input("Hizmet TL", value=float(dv[3]))
-                kar = c1.number_input("Kâr %", value=float(dv[4]))
-                kdv = c2.selectbox("KDV %", [0, 1, 10, 20], index=3)
-                kdv_d = c3.radio("Maliyet", ["KDV Hariç", "KDV Dahil"], index=int(dv[6]))
-                eur_k = st.number_input("EURO", value=st.session_state.get("eur_val", float(dv[7])))
-                usd_k = st.number_input("USD", value=st.session_state.get("usd_val", float(dv[8])))
-                if st.form_submit_button("Kaydet"):
-                    new_row = [sel_plat, kom, kargo, hizmet, kar, kdv, (1 if kdv_d=="KDV Dahil" else 0), eur_k, usd_k]
+                kargo = c2.number_input("Kargo (KDV Hariç)", value=float(dv[2]))
+                hizmet = c3.number_input("Hizmet (KDV Hariç)", value=float(dv[3]))
+                kar = c1.number_input("Hedef Kâr %", value=float(dv[4]))
+                kdv = c2.selectbox("Ürün KDV %", [0, 1, 10, 20], index=3)
+                m_tipi = c3.radio("Excel Maliyeti", ["KDV Hariç", "KDV Dahil"], index=int(dv[6]))
+                eur_k = st.number_input("Euro Kuru", value=st.session_state.get("eur_v", float(dv[7])))
+                usd_k = st.number_input("Dolar Kuru", value=st.session_state.get("usd_v", float(dv[8])))
+                
+                if st.form_submit_button("Ayarları Güncelle"):
+                    new_row = [sel_plat, kom, kargo, hizmet, kar, kdv, (1 if m_tipi=="KDV Dahil" else 0), eur_k, usd_k]
                     try:
                         cell = ws_set.find(sel_plat)
                         ws_set.update(f"A{cell.row}:I{cell.row}", [new_row])
                     except: ws_set.append_row(new_row)
-                    st.success("Kaydedildi!")
+                    st.success("Platform ayarları kaydedildi.")
 
-    # --- 3. VERİ YÜKLE ---
+    # 3. VERİ YÜKLE (MALZEME KODU BAŞLIĞI EŞLEŞTİRİLDİ)
     elif menu == "📥 Veri Yükle":
-        st.subheader("📥 Excel Veri Yükleme")
-        file = st.file_uploader("Dosya Seç", type=['xlsx'])
-        if st.button("Aktarımı Başlat") and file:
+        st.subheader("📥 Excel'den Malzeme Aktarımı")
+        file = st.file_uploader("Ürün Listesi Seçin (xlsx)", type=['xlsx'])
+        if st.button("Verileri Buluta İşle") and file:
             xls = pd.ExcelFile(file)
             all_rows = []
             for sheet in xls.sheet_names:
                 df = pd.read_excel(file, sheet_name=sheet, header=None).fillna("")
                 c_idx, p_idx, n_idx, s_idx = -1, -1, -1, -1
-                for i in range(min(20, len(df))):
-                    row = [str(v).upper().strip() for v in df.iloc[i].values]
-                    if any(x in row for x in ["MALZEME KODU", "KOD"]): c_idx = next(idx for idx,v in enumerate(row) if v in ["MALZEME KODU", "KOD"])
-                    if "BİRİM FİYATI" in row: p_idx = row.index("BİRİM FİYATI")
-                    if any(x in row for x in ["MALZEME ADI", "ÜRÜN ADI"]): n_idx = next(idx for idx,v in enumerate(row) if v in ["MALZEME ADI", "ÜRÜN ADI"])
-                    if any(x in row for x in ["CM.", "CM", "BOY"]): s_idx = next(idx for idx,v in enumerate(row) if v in ["CM.", "CM", "BOY"])
                 
-                if p_idx != -1 and n_idx != -1:
+                # Sütun başlıklarını tespit etme (İlk 25 satırı tarar)
+                for i in range(min(25, len(df))):
+                    row = [str(v).upper().strip() for v in df.iloc[i].values]
+                    # MALZEME KODU başlıklı sütunu arıyoruz
+                    if any(x in row for x in ["MALZEME KODU", "STOK KODU", "KOD"]):
+                        c_idx = next(idx for idx,v in enumerate(row) if v in ["MALZEME KODU", "STOK KODU", "KOD"])
+                    if "BİRİM FİYATI" in row: p_idx = row.index("BİRİM FİYATI")
+                    if any(x in row for x in ["MALZEME ADI", "ÜRÜN ADI"]):
+                        n_idx = next(idx for idx,v in enumerate(row) if v in ["MALZEME ADI", "ÜRÜN ADI"])
+                    if any(x in row for x in ["CM.", "CM", "BOY"]):
+                        s_idx = next(idx for idx,v in enumerate(row) if v in ["CM.", "CM", "BOY"])
+                
+                # Eğer başlıklar bulunduysa veriyi işle
+                if n_idx != -1 and p_idx != -1:
                     for _, row in df.iloc[i+1:].iterrows():
-                        raw_name = str(row[n_idx]).strip()
-                        if raw_name == "" and n_idx+1 < len(row): raw_name = str(row[n_idx+1]).strip()
-                        if raw_name == "": continue
+                        # Ürün Adı kontrolü (Merged cell desteği)
+                        uname = str(row[n_idx]).strip()
+                        if uname == "" and n_idx+1 < len(row): uname = str(row[n_idx+1]).strip()
+                        if uname == "" or uname.upper() == "NAN": continue
                         
+                        # Malzeme Kodu okuma
                         mkod = str(row[c_idx]).strip() if c_idx != -1 else "-"
                         mboy = str(row[s_idx]).strip() if s_idx != -1 else "-"
+                        
+                        # Fiyat temizleme
                         try:
                             f_raw = row[p_idx]
                             f_clean = float(str(f_raw).replace('.', '').replace(',', '.'))
                         except: f_clean = 0.0
                         
+                        # Döviz (Birim Fiyatının sağındaki kolon)
                         d_raw = str(row[p_idx+1]).strip().upper() if p_idx+1 < len(row) else "TL"
-                        d_tipi = "EUR" if "EUR" in d_raw else ("USD" if "USD" in d_raw else "TL")
+                        d_tipi = "EUR" if "EUR" in d_raw or "€" in d_raw else ("USD" if "USD" in d_raw or "$" in d_raw else "TL")
                         
-                        all_rows.append([mkod, raw_name, mboy, f_clean, d_tipi, sheet])
+                        all_rows.append([mkod, uname, mboy, f_clean, d_tipi, sheet])
             
             if all_rows:
                 ws_prod = get_worksheet("Products")
-                # Sütun başlıklarını garantiye al
-                ws_prod.clear()
+                ws_prod.clear() # Temiz bir başlangıç için başlıkları koruyarak siler
                 ws_prod.append_row(["kod", "urun_adi", "boy", "maliyet", "doviz", "kategori"])
                 ws_prod.append_rows(all_rows)
-                st.success("✅ Veriler yüklendi ve başlıklar düzeltildi!")
+                st.success(f"✅ {len(all_rows)} ürün başarıyla MALZEME KODU ile birlikte kaydedildi!")
 
-    # --- 4. TEMİZLEME ---
+    # 4. TEMİZLEME
     elif menu == "🗑️ Veritabanı Yönetimi":
-        st.subheader("🗑️ Sistemi Sıfırla")
-        if st.checkbox("Tüm verileri silmeyi onaylıyorum") and st.button("SİL"):
+        st.subheader("🗑️ Tüm Verileri Sil")
+        if st.checkbox("Ürün listesini kalıcı olarak silmeyi onaylıyorum") and st.button("Veritabanını Sıfırla"):
             ws_prod = get_worksheet("Products")
             if ws_prod:
                 ws_prod.clear()
                 ws_prod.append_row(["kod", "urun_adi", "boy", "maliyet", "doviz", "kategori"])
-                st.success("Veritabanı sıfırlandı.")
+                st.success("Tüm ürün verileri silindi.")
