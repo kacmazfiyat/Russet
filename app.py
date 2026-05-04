@@ -6,7 +6,7 @@ import re
 import requests
 import xml.etree.ElementTree as ET
 
-st.set_page_config(page_title="Pazaryeri Fiyat Motoru v28", layout="wide")
+st.set_page_config(page_title="Pazaryeri Fiyat Motoru v58", layout="wide")
 
 # --- TCMB KUR ÇEKME ---
 def get_tcmb_kurlar():
@@ -88,7 +88,7 @@ if check_password():
                     else: ws_set.append_row(new_row)
                     st.success("Kaydedildi!")
 
-    # --- VERİ YÜKLEME (GÜNCELLENMİŞ CM. TESPİTİ) ---
+    # --- VERİ YÜKLEME ---
     elif menu == "📥 Veri Yükle":
         st.subheader("📥 Excel'den Buluta Aktar")
         file = st.file_uploader("Excel Dosyası", type=['xlsx'])
@@ -103,10 +103,10 @@ if check_password():
                     # Başlık Satırını ve Sütunları Tespit Et
                     for i in range(min(20, len(df))):
                         row_vals = [str(val).upper().strip() for val in df.iloc[i].values]
-                        if "BİRİM FİYATI" in row_vals: price_col = row_vals.index("BİRİM FİYATI")
+                        if "BİRİM FİYATI" in row_vals: 
+                            price_col = row_vals.index("BİRİM FİYATI")
                         if any(x in row_vals for x in ["MALZEME ADI", "ÜRÜN ADI"]):
                             name_col = next(idx for idx, v in enumerate(row_vals) if v in ["MALZEME ADI", "ÜRÜN ADI"])
-                        # KRİTİK DÜZELTME: "CM." başlığını arıyoruz
                         if any(x in row_vals for x in ["CM.", "CM", "BOY", "ÖLÇÜ"]):
                             size_col = next(idx for idx, v in enumerate(row_vals) if v in ["CM.", "CM", "BOY", "ÖLÇÜ"])
                     
@@ -117,24 +117,31 @@ if check_password():
                             
                             # BOY BULMA STRATEJİSİ
                             extracted_boy = "-"
-                            
-                            # 1. Strateji: Başlıkta "CM." bulunan sütunda veri var mı?
                             if size_col != -1 and str(row[size_col]).strip() != "":
                                 val = str(row[size_col]).strip()
                                 extracted_boy = val if "CM" in val.upper() else f"{val} CM"
-                            
-                            # 2. Strateji: İsim içinde '15 CM' yazıyor mu?
                             elif re.search(r'(\d+)\s*CM', raw_name, flags=re.I):
                                 match = re.search(r'(\d+)\s*CM', raw_name, flags=re.I)
                                 extracted_boy = match.group(0).upper()
                                 raw_name = raw_name.replace(match.group(0), "").strip()
 
+                            # FİYAT TEMİZLEME
                             try:
                                 f_raw = row[price_col]
                                 f_clean = float(str(f_raw).replace('.', '').replace(',', '.')) if isinstance(f_raw, str) else float(f_raw)
                             except: f_clean = 0.0
-                            d_raw = str(row[price_col + 1]).strip().upper() if len(row) > price_col + 1 else "TL"
-                            d_tipi = "EUR" if "EUR" in d_raw or "€" in d_raw else ("USD" if "USD" in d_raw or "$" in d_raw else "TL")
+
+                            # DÖVİZ TESPİTİ (Fiyatın bir sağındaki kolon)
+                            # Sizin isteğiniz doğrultusunda revize edilen kısım burasıdır
+                            d_col_idx = price_col + 1
+                            d_raw = "TL"
+                            if d_col_idx < len(row):
+                                d_raw = str(row[d_col_idx]).strip().upper()
+                            
+                            # Döviz tipini normalize et
+                            if any(x in d_raw for x in ["EUR", "€", "EURO"]): d_tipi = "EUR"
+                            elif any(x in d_raw for x in ["USD", "$", "DOLAR"]): d_tipi = "USD"
+                            else: d_tipi = "TL"
                             
                             all_rows.append([raw_name, extracted_boy, f_clean, d_tipi, sheet_name])
                 
@@ -150,29 +157,43 @@ if check_password():
             s_data, p_data = pd.DataFrame(ws_set.get_all_records()), pd.DataFrame(ws_prod.get_all_records())
             if not s_data.empty and not p_data.empty:
                 p_list = list(s_data['platform'].unique())
-                target = st.selectbox("", p_list, index=(p_list.index("Trendyol") if "Trendyol" in p_list else 0))
+                target = st.selectbox("Hesaplama Yapılacak Platform", p_list)
                 search = st.text_input("Arama yapın...", placeholder="Ürün adı veya boy...")
+                
                 s = s_data[s_data['platform'] == target].iloc[0]
-                df = p_data[p_data['urun_adi'].str.contains(search, case=False) | p_data['boy'].astype(str).str.contains(search, case=False)]
+                df = p_data[p_data['urun_adi'].str.contains(search, case=False) | p_data['boy'].astype(str).str.contains(search, case=False)].copy()
                 
                 def calc_price(row):
-                    m = float(row['maliyet'])
-                    if row['doviz'] == "EUR": m *= float(s['eur'])
-                    elif row['doviz'] == "USD": m *= float(s['usd'])
-                    m_net = m / (1 + (s['kdv']/100)) if s['kdv_dahil'] == 1 else m
-                    gider = m_net + (float(s['kargo'])/1.2) + (float(s['hizmet'])/1.2)
-                    payda = 1 - ((float(s['komisyon']) + float(s['kar']))/100)
-                    return round((gider/payda)*(1+(s['kdv']/100)), 2) if payda > 0 else 0
+                    try:
+                        m = float(row['maliyet'])
+                        if row['doviz'] == "EUR": m *= float(s['eur'])
+                        elif row['doviz'] == "USD": m *= float(s['usd'])
+                        
+                        m_net = m / (1 + (s['kdv']/100)) if s['kdv_dahil'] == 1 else m
+                        gider = m_net + (float(s['kargo'])/1.2) + (float(s['hizmet'])/1.2)
+                        payda = 1 - ((float(s['komisyon']) + float(s['kar']))/100)
+                        
+                        return round((gider/payda)*(1+(s['kdv']/100)), 2) if payda > 0 else 0
+                    except: return 0
 
                 if not df.empty:
                     df['Satış Fiyatı'] = df.apply(calc_price, axis=1)
-                    st.data_editor(df, use_container_width=True, hide_index=True)
+                    # Sütunları daha okunabilir isimlerle gösterelim
+                    display_df = df.rename(columns={
+                        'urun_adi': 'Ürün Adı',
+                        'boy': 'Boy/Ölçü',
+                        'maliyet': 'Maliyet',
+                        'doviz': 'Kur',
+                        'kategori': 'Kategori'
+                    })
+                    st.data_editor(display_df, use_container_width=True, hide_index=True)
 
     # --- TEMİZLE ---
     elif menu == "🗑️ Veritabanı Yönetimi":
         st.subheader("🗑️ Veritabanını Temizle")
-        if st.checkbox("Onaylıyorum") and st.button("Tümünü Sil"):
+        st.warning("Bu işlem geri alınamaz!")
+        if st.checkbox("Ürün listesini tamamen silmeyi onaylıyorum") and st.button("Tümünü Sil"):
             ws_prod = get_worksheet("Products")
             if ws_prod:
                 ws_prod.batch_clear(["A2:E10000"])
-                st.success("Temizlendi!")
+                st.success("Veritabanı başarıyla temizlendi!")
